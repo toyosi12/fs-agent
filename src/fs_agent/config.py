@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -15,6 +16,11 @@ class Settings(BaseModel):
     orchestration_pattern: Literal["sequential"] = "sequential"
     artifact_dir: Path = Field(default_factory=lambda: Path("artifacts"))
     dry_run: bool = False
+    llm_provider: Literal["dummy", "openai", "auto"] = Field(
+        default_factory=lambda: os.getenv("FS_AGENT_LLM_PROVIDER", "dummy")
+    )
+    llm_model: str = Field(default_factory=lambda: os.getenv("FS_AGENT_LLM_MODEL", "gpt-4o-mini"))
+    openai_api_key: str | None = Field(default_factory=lambda: os.getenv("FS_AGENT_OPENAI_API_KEY"))
 
 
 @lru_cache(maxsize=1)

@@ -14,18 +14,27 @@ def test_sequential_orchestrator_runs_in_order(tmp_path: Path) -> None:
     assert roles == ["backend", "frontend", "infra"]
     assert reports[-1].artifacts["infra_pipeline"]["artifacts"] == [
         "backend_blueprint",
+        "backend_source",
         "frontend_blueprint",
+        "frontend_source",
     ]
 
     saved = sorted(p.name for p in tmp_path.iterdir())
-    assert saved == [
+    expected = {
         "backend_backend_blueprint.json",
+        "backend_backend_source.json",
         "backend_plan.md",
+        "backend_service.ts",
         "frontend_frontend_blueprint.json",
+        "frontend_frontend_source.json",
+        "frontend_app.tsx",
         "frontend_plan.md",
         "infra_infra_pipeline.json",
+        "infra_infra_runbook.json",
         "infra_plan.md",
-    ]
+        "infra_runbook.md",
+    }
+    assert saved == sorted(expected)
 
     for report in reports:
         assert report.metadata["artifact_files"], "artifact paths should be recorded"

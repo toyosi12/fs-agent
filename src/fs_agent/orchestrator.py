@@ -7,21 +7,37 @@ from typing import Iterable
 
 from .config import Settings, get_settings
 from .context import AgentReport, RunContext
+from dotenv import load_dotenv
 from .logger import get_logger
 from .orchestration import AgentRegistry, SequentialOrchestrator, register_default_agents
+from .llm import BaseLLMClient, build_llm_client
 from .spec_loader import load_spec
+import os
 
+load_dotenv()
 
 logger = get_logger(__name__)
 
+openai_api_key = os.getenv("FS_AGENT_OPENAI_API_KEY")
+llm_provider = os.getenv("LLM_PROVIDER")
+llm_model = os.getenv("LLM_MODEL")
 
-def _resolve_settings(artifact_dir: Path | None, dry_run: bool | None) -> Settings:
+def _resolve_settings(
+    artifact_dir: Path | None,
+    dry_run: bool | None,
+) -> Settings:
     base = get_settings()
     update: dict[str, object] = {}
     if artifact_dir is not None:
         update["artifact_dir"] = artifact_dir
     if dry_run is not None:
         update["dry_run"] = dry_run
+    if llm_provider is not None:
+        update["llm_provider"] = llm_provider
+    if llm_model is not None:
+        update["llm_model"] = llm_model
+    if openai_api_key is not None:
+        update["openai_api_key"] = openai_api_key
     return base.model_copy(update=update)
 
 
@@ -35,11 +51,14 @@ def run_orchestration(
     spec_path: Path,
     *,
     artifact_dir: Path | None = None,
-    dry_run: bool | None = None,
+    dry_run: bool | None = None
 ) -> Iterable[AgentReport]:
     """Load the spec and execute the configured orchestration pattern."""
 
-    settings = _resolve_settings(artifact_dir, dry_run)
+
+    get_settings.cache_clear()
+
+    settings = _resolve_settings(artifact_dir, dry_run=dry_run)
     logger.info(
         "Starting orchestration pattern=%s spec=%s artifact_dir=%s dry_run=%s",
         settings.orchestration_pattern,
@@ -49,11 +68,14 @@ def run_orchestration(
     )
     spec = load_spec(spec_path)
     settings.artifact_dir.mkdir(parents=True, exist_ok=True)
+    llm_client = _build_llm(settings)
+
     context = RunContext(
         spec=spec,
         settings=settings,
         workspace_dir=Path.cwd(),
         artifact_dir=settings.artifact_dir,
+        llm=llm_client,
     )
 
     registry = AgentRegistry()
@@ -67,3 +89,15 @@ def run_orchestration(
         len(context.artifacts),
     )
     return reports
+
+
+def _build_llm(settings: Settings) -> BaseLLMClient:
+    try:
+        return build_llm_client(
+            settings.llm_provider,
+            model=settings.llm_model,
+            api_key=settings.openai_api_key,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error("LLM client creation failed: %s; defaulting to dummy", exc)
+        return build_llm_client("dummy", model=settings.llm_model, api_key=None)

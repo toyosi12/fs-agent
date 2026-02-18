@@ -23,7 +23,13 @@ def run(
 ) -> None:
     """Execute the orchestrator against a project spec."""
 
-    reports = list(run_orchestration(spec, artifact_dir=artifact_dir, dry_run=dry_run))
+    reports = list(
+        run_orchestration(
+            spec,
+            artifact_dir=artifact_dir,
+            dry_run=dry_run
+        )
+    )
     _print_summary(reports)
 
 

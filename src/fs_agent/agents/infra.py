@@ -21,6 +21,7 @@ class InfraAgent(BaseAgent):
             "targets": targets,
             "artifacts": list(context.artifacts.keys()),
         }
+        runbook = self._generate_infra_plan(context, pipeline)
         attachments = [
             AgentArtifact(
                 name="infra_plan.md",
@@ -34,15 +35,63 @@ class InfraAgent(BaseAgent):
                     ]
                     + [f"- {t['environment']} -> {t['name']}" for t in targets]
                 ),
-            )
+            ),
+            AgentArtifact(
+                name="infra_runbook.md",
+                kind="doc",
+                description="LLM-generated deployment checklist",
+                body=runbook,
+            ),
         ]
         result = AgentResult(
             role=self.role,
             summary=f"Drafted infra plan for {len(targets)} targets.",
-            artifacts={"infra_pipeline": pipeline},
+            artifacts={
+                "infra_pipeline": pipeline,
+                "infra_runbook": {"body": runbook},
+            },
             attachments=attachments,
             started_at=start,
             finished_at=datetime.now(timezone.utc),
         )
         self.logger.info(result.summary)
         return result
+
+    def _generate_infra_plan(self, context: RunContext, pipeline: dict[str, object]) -> str:
+        metadata = context.spec.metadata
+        targets = pipeline.get("targets", []) or []
+        target_lines = [
+            f"- {target['environment']} ({target['runtime']}): {target['name']}"
+            for target in targets
+        ]
+        prompt = (
+            f"Project: {metadata.name}\n"
+            f"Summary: {metadata.summary}\n"
+            f"CI: {pipeline['ci']}\nCD: {pipeline['cd']}\n\n"
+            "Produce a deployment runbook covering environment promotion, release gates,"
+            " secrets management, and rollback triggers for the environments below.\n"
+            + ("\n".join(target_lines) if target_lines else "- No targets defined")
+        )
+        system = (
+            "You are an experienced DevOps engineer. Outline infra steps with numbered"
+            " checklists and commands where possible."
+        )
+        try:
+            return context.llm.generate(prompt, system=system, temperature=0.2)
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.warning("LLM generation failed for infra: %s", exc)
+            return self._fallback_runbook(target_lines)
+
+    def _fallback_runbook(self, target_lines: list[str]) -> str:
+        body = ["# Deployment Runbook (fallback)", "## Targets"]
+        body.extend(target_lines or ["- N/A"])
+        body.extend(
+            [
+                "## Steps",
+                "1. Push code and trigger CI.",
+                "2. Build Docker image and run smoke tests.",
+                "3. Deploy to staging, run E2E, then promote to prod.",
+                "4. Monitor metrics; rollback on sustained errors.",
+            ]
+        )
+        return "\n".join(body)

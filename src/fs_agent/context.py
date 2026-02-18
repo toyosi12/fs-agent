@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .llm import BaseLLMClient
 from .models.spec import ProjectSpec
 
 
@@ -32,6 +33,7 @@ class RunContext:
     settings: Settings
     workspace_dir: Path
     artifact_dir: Path
+    llm: BaseLLMClient
     transcripts: list[AgentReport] = field(default_factory=list)
 
     def record(self, report: AgentReport) -> None:

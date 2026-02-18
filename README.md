@@ -22,9 +22,19 @@ pip install -e .[dev]
 
 # run the orchestrator with the sample specification
 fs-agent examples/specs/todo_app.yaml --artifact-dir artifacts/demo
+
+# optional: point agents at a live LLM (defaults to a deterministic placeholder)
+FS_AGENT_LLM_PROVIDER=openai FS_AGENT_OPENAI_API_KEY=sk-... \
+	fs-agent examples/specs/todo_app.yaml --llm-model gpt-4o-mini
 ```
 
-The CLI prints a Rich-formatted summary and writes each agent's outputs into the requested artifact directory (JSON blueprints plus Markdown plans such as `backend_backend_blueprint.json` and `backend_plan.md`).
+The CLI prints a Rich-formatted summary and writes each agent's outputs into the requested artifact directory (JSON blueprints plus Markdown/code artifacts such as `backend_backend_source.json`, `backend_plan.md`, and `backend_service.ts`).
+
+## LLM configuration
+- **.env loading** – The CLI automatically loads environment variables from `.env` in the workspace root (or from a custom path via `--env-file`).
+- **Default** – `FS_AGENT_LLM_PROVIDER` defaults to `dummy`, so agents emit deterministic placeholder code without leaving the machine.
+- **OpenAI** – export `FS_AGENT_LLM_PROVIDER=openai` and `FS_AGENT_OPENAI_API_KEY=<your key>` (or pass `--llm-provider` / `--openai-api-key`). Adjust the target model via `FS_AGENT_LLM_MODEL` or `--llm-model`.
+- **Per-run overrides** – CLI options `--llm-provider`, `--llm-model`, and `--openai-api-key` flow into the orchestrator if you need to mix providers during experimentation.
 
 ## Orchestration Pattern
 The sequential pattern enforces the order `Backend → Frontend → Infra`. Each agent receives:
