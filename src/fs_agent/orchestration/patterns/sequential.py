@@ -26,7 +26,7 @@ class SequentialOrchestrator(OrchestrationPattern):
             AgentRole.ARCHITECT,
             AgentRole.BACKEND,
             AgentRole.FRONTEND,
-            # AgentRole.INFRA,  # disabled for now
+            AgentRole.INFRA,
         )
         self.logger = get_logger(self.__class__.__name__)
 

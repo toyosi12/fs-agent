@@ -48,7 +48,7 @@ class BackendAgent(BaseAgent):
         code_body = self._generate_backend_code(context, blueprint, scoped)
         migration_files = self._generate_migrations(context, blueprint)
         mcp_plan = self._generate_project_plan(context, spec, blueprint, code_body, migration_files)
-        projects_root = context.artifact_dir / "projects"
+        projects_root = context.projects_dir
         application = apply_filesystem_plan(
             mcp_plan,
             projects_root,

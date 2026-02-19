@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import re
+
 from .config import Settings
 from .llm import BaseLLMClient
 from .models.spec import ProjectSpec
@@ -54,6 +56,23 @@ class RunContext:
         for report in self.transcripts:
             combined.update(report.artifacts)
         return combined
+
+    @property
+    def projects_dir(self) -> Path:
+        """Return the dedicated parent folder for this project's generated code.
+
+        Structure: <artifact_dir>/projects/<slug>/
+        """
+        spec = self.require_spec()
+        slug = self._slugify(spec.metadata.name)
+        return self.artifact_dir / "projects" / slug
+
+    @staticmethod
+    def _slugify(value: str) -> str:
+        value = value.lower()
+        value = re.sub(r"[^a-z0-9]+", "-", value)
+        value = value.strip("-")
+        return value or "project"
 
     # ------------------------------------------------------------------
     # Scoped context helpers – each returns only what the agent needs

@@ -63,7 +63,7 @@ class FrontendAgent(BaseAgent):
 
         code_body = self._generate_frontend_code(context, routes, backend_blueprint)
         mcp_plan = self._generate_project_plan(context, spec, routes, backend_blueprint, code_body)
-        projects_root = context.artifact_dir / "projects"
+        projects_root = context.projects_dir
         application = apply_filesystem_plan(
             mcp_plan,
             projects_root,

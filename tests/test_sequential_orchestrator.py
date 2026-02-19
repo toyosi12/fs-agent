@@ -33,11 +33,11 @@ def test_sequential_orchestrator_runs_in_order(tmp_path: Path) -> None:
     frontend_files = reports[2].artifacts["frontend_project_files"]
     assert frontend_files, "frontend should record created files"
 
-    # --- Infra should see all prior artifacts ---
-    infra_artifacts = reports[-1].artifacts["infra_pipeline"]["artifacts"]
-    assert "architect_spec" in infra_artifacts
-    assert "backend_blueprint" in infra_artifacts
-    assert "frontend_blueprint" in infra_artifacts
+    # --- Infra should have bootstrapped the project ---
+    infra_artifacts = reports[-1].artifacts
+    assert "db_name" in infra_artifacts
+    assert "backend_dir" in infra_artifacts
+    assert "frontend_dir" in infra_artifacts
 
     # --- Saved files ---
     saved = sorted(p.name for p in tmp_path.iterdir() if p.is_file())
@@ -46,11 +46,15 @@ def test_sequential_orchestrator_runs_in_order(tmp_path: Path) -> None:
     assert "architect_architect_summary.json" in saved
     assert "architect_spec.json" in saved
 
-    # --- Projects directory ---
+    # --- Projects directory (projects/<slug>/<slug>-backend etc.) ---
     projects_dir = tmp_path / "projects"
     assert projects_dir.exists()
-    backend_root = projects_dir / backend_plan["project_root"]
-    frontend_root = projects_dir / frontend_plan["project_root"]
+    # Find the project parent folder (the slug)
+    project_parents = [d for d in projects_dir.iterdir() if d.is_dir()]
+    assert project_parents, "should have a project parent folder"
+    parent = project_parents[0]
+    backend_root = parent / backend_plan["project_root"]
+    frontend_root = parent / frontend_plan["project_root"]
     assert (backend_root / "package.json").exists()
     assert (frontend_root / "package.json").exists()
 
