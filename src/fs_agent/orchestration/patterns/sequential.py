@@ -23,9 +23,10 @@ class SequentialOrchestrator(OrchestrationPattern):
     ) -> None:
         self.registry = registry
         self.order: Sequence[AgentRole] = order or (
+            AgentRole.ARCHITECT,
             AgentRole.BACKEND,
             AgentRole.FRONTEND,
-            AgentRole.INFRA,
+            # AgentRole.INFRA,  # disabled for now
         )
         self.logger = get_logger(self.__class__.__name__)
 

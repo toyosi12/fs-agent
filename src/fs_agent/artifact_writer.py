@@ -50,6 +50,7 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def _write_attachment(path: Path, attachment: AgentArtifact) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     body = attachment.body
     if isinstance(body, bytes):
         path.write_bytes(body)

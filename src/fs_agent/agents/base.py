@@ -12,6 +12,7 @@ from ..logger import get_logger
 
 
 class AgentRole(str, Enum):
+    ARCHITECT = "architect"
     BACKEND = "backend"
     FRONTEND = "frontend"
     INFRA = "infra"
@@ -52,9 +53,12 @@ class BaseAgent:
     def render_header(self, context: RunContext) -> str:
         """Return a short textual header summarizing the assignment."""
 
+        spec = context.spec
+        project_name = spec.metadata.name if spec else "Unspecified Project"
+        owner = spec.metadata.owner if spec else "unknown"
         return (
-            f"Project: {context.spec.metadata.name}\n"
-            f"Owner: {context.spec.metadata.owner}\n"
+            f"Project: {project_name}\n"
+            f"Owner: {owner}\n"
             f"Stage: {self.role.value}\n"
         )
 

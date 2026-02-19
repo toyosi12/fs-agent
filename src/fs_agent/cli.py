@@ -17,7 +17,7 @@ console = Console()
 
 @app.command()
 def run(
-    spec: Path = typer.Argument(..., help="Path to project spec YAML"),
+    request: str = typer.Argument(..., help="Natural language description of the desired app"),
     artifact_dir: Path | None = typer.Option(None, help="Directory to store generated artifacts"),
     dry_run: bool = typer.Option(False, help="Skip shell-side effects and focus on planning"),
 ) -> None:
@@ -25,7 +25,7 @@ def run(
 
     reports = list(
         run_orchestration(
-            spec,
+            request,
             artifact_dir=artifact_dir,
             dry_run=dry_run
         )

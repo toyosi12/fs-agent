@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, Type
 
-from ..agents import BackendAgent, FrontendAgent, InfraAgent
+from ..agents import ArchitectAgent, BackendAgent, FrontendAgent, InfraAgent
 from ..agents.base import AgentRole, BaseAgent
 
 
@@ -25,6 +25,7 @@ class AgentRegistry:
 
 
 def register_default_agents(registry: AgentRegistry) -> None:
+    registry.register(AgentRole.ARCHITECT, ArchitectAgent)
     registry.register(AgentRole.BACKEND, BackendAgent)
     registry.register(AgentRole.FRONTEND, FrontendAgent)
     registry.register(AgentRole.INFRA, InfraAgent)

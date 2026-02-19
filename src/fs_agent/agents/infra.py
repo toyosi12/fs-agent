@@ -13,7 +13,9 @@ class InfraAgent(BaseAgent):
 
     def run(self, context: RunContext) -> AgentResult:
         start = datetime.now(timezone.utc)
-        infra = context.spec.infra
+        scoped = context.infra_context()  # only metadata + infra
+        spec = context.require_spec()
+        infra = spec.infra
         targets = [target.model_dump() for target in infra.targets]
         pipeline = {
             "ci": infra.ci,
@@ -58,7 +60,7 @@ class InfraAgent(BaseAgent):
         return result
 
     def _generate_infra_plan(self, context: RunContext, pipeline: dict[str, object]) -> str:
-        metadata = context.spec.metadata
+        metadata = context.require_spec().metadata
         targets = pipeline.get("targets", []) or []
         target_lines = [
             f"- {target['environment']} ({target['runtime']}): {target['name']}"

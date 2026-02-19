@@ -39,7 +39,7 @@ class DummyLLMClient(BaseLLMClient):
 class OpenAILLMClient(BaseLLMClient):
     """Minimal OpenAI Chat Completions client."""
 
-    def __init__(self, api_key: str, model: str, *, timeout: float = 60.0) -> None:
+    def __init__(self, api_key: str, model: str, *, timeout: float = 500.0) -> None:
         super().__init__(model)
         self.api_key = api_key
         self._client = httpx.Client(timeout=timeout)

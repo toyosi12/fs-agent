@@ -1,6 +1,6 @@
 # fs-agent
 
-Python-based multi-agent orchestrator that drafts full-stack JavaScript applications by coordinating specialized agents (backend, frontend, infra) through a sequential workflow. The initial goal is to prove out a deterministic stage-gate pipeline while leaving room to plug in richer orchestration patterns later.
+Python-based multi-agent orchestrator that drafts full-stack JavaScript applications by coordinating specialized agents (architect, backend, frontend, infra) through a sequential workflow. The initial goal is to prove out a deterministic stage-gate pipeline while leaving room to plug in richer orchestration patterns later.
 
 ## Why it exists
 - Capture product requirements once and let agents specialize without stepping on each other.
@@ -10,35 +10,39 @@ Python-based multi-agent orchestrator that drafts full-stack JavaScript applicat
 
 ## Components
 1. **Orchestrator** – Applies an orchestration pattern (sequential for now) and hands off context between agents.
-2. **Backend Agent** – Plans Node/Express (or similar) API implementations and testing hooks.
-3. **Frontend Agent** – Plans UI flows that consume the generated APIs.
-4. **Infra Agent** – Suggests deployment architecture, environments, and automation steps.
-5. **Shared Context** – pydantic spec + artifact tracker that every agent can read/append.
+2. **Architect Agent** – Converts a natural-language product request into a validated YAML spec.
+3. **Backend Agent** – Plans Node/Express APIs and emits MCP filesystem operations for the full project.
+4. **Frontend Agent** – Plans UI flows, generates React code, and publishes MCP instructions for the SPA.
+5. **Infra Agent** – Suggests deployment architecture, environments, and automation steps.
+6. **Shared Context** – pydantic spec + artifact tracker that every agent can read/append.
 
 ## Quickstart
 ```bash
 # create a virtual environment however you prefer, then
 pip install -e .[dev]
 
-# run the orchestrator with the sample specification
-fs-agent examples/specs/todo_app.yaml --artifact-dir artifacts/demo
+# describe the product you want
+fs-agent "Build a collaborative task manager" --artifact-dir artifacts/demo
 
 # optional: point agents at a live LLM (defaults to a deterministic placeholder)
 FS_AGENT_LLM_PROVIDER=openai FS_AGENT_OPENAI_API_KEY=sk-... \
-	fs-agent examples/specs/todo_app.yaml --llm-model gpt-4o-mini
+	fs-agent "Build a collaborative task manager" --llm-model gpt-4o-mini
 ```
-
+The CLI prints a Rich-formatted summary and writes each agent's outputs into the requested artifact directory. Expect the stack below:
+- `architect_spec.yaml` – generated YAML spec plus JSON copies for downstream automations.
+- `backend_*.json` / `frontend_*.json` – MCP-friendly filesystem plans alongside the generated TypeScript/React code.
+- `infra_plan.md` / `infra_runbook.md` – deployment guidance that references every upstream artifact.
 The CLI prints a Rich-formatted summary and writes each agent's outputs into the requested artifact directory (JSON blueprints plus Markdown/code artifacts such as `backend_backend_source.json`, `backend_plan.md`, and `backend_service.ts`).
 
-## LLM configuration
+- **.env loading** – The CLI automatically loads environment variables from `.env` in the workspace root via `python-dotenv`.
 - **.env loading** – The CLI automatically loads environment variables from `.env` in the workspace root (or from a custom path via `--env-file`).
 - **Default** – `FS_AGENT_LLM_PROVIDER` defaults to `dummy`, so agents emit deterministic placeholder code without leaving the machine.
-- **OpenAI** – export `FS_AGENT_LLM_PROVIDER=openai` and `FS_AGENT_OPENAI_API_KEY=<your key>` (or pass `--llm-provider` / `--openai-api-key`). Adjust the target model via `FS_AGENT_LLM_MODEL` or `--llm-model`.
-- **Per-run overrides** – CLI options `--llm-provider`, `--llm-model`, and `--openai-api-key` flow into the orchestrator if you need to mix providers during experimentation.
+- **OpenAI** – export `FS_AGENT_LLM_PROVIDER=openai` and `FS_AGENT_OPENAI_API_KEY=<your key>`. Adjust the target model via `FS_AGENT_LLM_MODEL`.
+- **Per-run overrides** – Set the env vars above inline with the command (e.g. `FS_AGENT_LLM_MODEL=gpt-4.1 fs-agent "..."`).
 
 ## Orchestration Pattern
-The sequential pattern enforces the order `Backend → Frontend → Infra`. Each agent receives:
-- The validated project spec
+The sequential pattern enforces the order `Architect → Backend → Frontend → Infra`. Each agent receives:
+- The latest project spec (architect writes it, downstream agents require it)
 - Aggregated artifacts from prior agents
 - A lightweight execution transcript to keep track of decisions
 
@@ -48,13 +52,13 @@ The orchestrator persists each agent's summary, artifacts, and status so that ot
 - **Agent Registry** – Register new roles or swap implementations without touching the orchestrator.
 - **Pattern Factory** – Choose orchestration strategies based on config (`sequential` today; hybrid/parallel later).
 - **Artifact Contracts** – Every agent returns structured artifacts (metadata + suggested file paths) so downstream automation can materialize real source files.
-- **Spec Schema** – `examples/specs/todo_app.yaml` shows how to describe endpoints, UI routes, and infra targets; extend it as requirements evolve.
+- **Spec Schema** – The architect agent emits YAML compatible with the `ProjectSpec` pydantic schema; extend it as requirements evolve.
 
 ## Roadmap Ideas
 - Parallelize frontend/backend once contracts are strong.
 - Add reviewer/QA agents that lint, test, and simulate deployments.
 - Integrate real LLM calls behind the agent skeletons (currently deterministic placeholders).
-- Emit actual JavaScript files instead of textual plans.
+- Execute MCP filesystem operations automatically after validating the generated plans.
 - Wire deployment steps into Terraform/Pulumi or platform CLIs.
 
 ## Contributing

@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 from .logger import get_logger
 from .orchestration import AgentRegistry, SequentialOrchestrator, register_default_agents
 from .llm import BaseLLMClient, build_llm_client
-from .spec_loader import load_spec
 import os
 
 load_dotenv()
@@ -48,30 +47,29 @@ def _build_pattern(settings: Settings, registry: AgentRegistry) -> SequentialOrc
 
 
 def run_orchestration(
-    spec_path: Path,
+    user_request: str,
     *,
     artifact_dir: Path | None = None,
     dry_run: bool | None = None
 ) -> Iterable[AgentReport]:
-    """Load the spec and execute the configured orchestration pattern."""
-
+    """Execute the configured orchestration pattern given a natural language brief."""
 
     get_settings.cache_clear()
 
     settings = _resolve_settings(artifact_dir, dry_run=dry_run)
     logger.info(
-        "Starting orchestration pattern=%s spec=%s artifact_dir=%s dry_run=%s",
+        "Starting orchestration pattern=%s request=%s artifact_dir=%s dry_run=%s",
         settings.orchestration_pattern,
-        spec_path,
+        user_request[:80].replace("\n", " "),
         artifact_dir or settings.artifact_dir,
         settings.dry_run,
     )
-    spec = load_spec(spec_path)
     settings.artifact_dir.mkdir(parents=True, exist_ok=True)
     llm_client = _build_llm(settings)
 
     context = RunContext(
-        spec=spec,
+        spec=None,
+        user_request=user_request,
         settings=settings,
         workspace_dir=Path.cwd(),
         artifact_dir=settings.artifact_dir,
