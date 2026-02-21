@@ -159,5 +159,3 @@ artifacts/benchmark/
 1. Create/activate a Python 3.11+ environment.
 2. `pip install -e .[dev]`
 3. Run `ruff check .` and `pytest` before opening pull requests.
-
-This repo is intentionally small to make experimentation fast — feel free to change the orchestration patterns or add new agents as your research progresses.
