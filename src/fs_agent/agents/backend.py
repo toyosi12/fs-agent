@@ -277,7 +277,7 @@ class BackendAgent(BaseAgent):
             "Respond with JSON only (no backticks) using this shape:\n"
             "{\n"
             "  \"tool\": \"mcp.fs\",\n"
-            "  \"project_root\": \"<slug>-backend\",\n"
+            "  \"project_root\": \"backend\",\n"
             "  \"instructions\": \"short summary\",\n"
             "  \"files\": [\n"
             "    {\n"
@@ -301,7 +301,7 @@ class BackendAgent(BaseAgent):
             return fallback_plan
 
         plan.setdefault("tool", "mcp.fs")
-        plan.setdefault("project_root", f"{slug}-backend")
+        plan.setdefault("project_root", "backend")
         if not isinstance(plan.get("files"), list) or not plan["files"]:
             self.logger.warning("Backend MCP plan missing files; using fallback")
             return fallback_plan
@@ -325,10 +325,9 @@ class BackendAgent(BaseAgent):
         migration_files: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         files = self._default_project_files(spec, blueprint, router_body, migration_files)
-        slug = self._slugify(spec.metadata.name)
         return {
             "tool": "mcp.fs",
-            "project_root": f"{slug}-backend",
+            "project_root": "backend",
             "instructions": f"Scaffold Express backend for {spec.metadata.name}",
             "files": [
                 {
@@ -347,7 +346,7 @@ class BackendAgent(BaseAgent):
         router_body: str,
         migration_files: dict[str, str] | None = None,
     ) -> dict[str, dict[str, str]]:
-        project_root = f"{self._slugify(spec.metadata.name)}-backend"
+        project_root = "backend"
         files = {
             "README.md": {
                 "description": "Backend overview and commands",

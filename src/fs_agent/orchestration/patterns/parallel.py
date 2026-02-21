@@ -183,7 +183,7 @@ class ParallelOrchestrator(OrchestrationPattern):
 
         self.logger.info("→ %s agent starting (thread)", role.value)
         result = agent.run(context)
-        saved_paths = persist_agent_output(result, context.artifact_dir)
+        saved_paths = persist_agent_output(result, context.metadata_dir)
         report = AgentReport(
             role=role.value,
             summary=result.summary,

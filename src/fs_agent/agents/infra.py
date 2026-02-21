@@ -26,8 +26,8 @@ class InfraAgent(BaseAgent):
         projects_dir = context.projects_dir
 
         # Locate sub-projects written by backend/frontend agents
-        backend_dir = projects_dir / f"{slug}-backend"
-        frontend_dir = projects_dir / f"{slug}-frontend"
+        backend_dir = projects_dir / "backend"
+        frontend_dir = projects_dir / "frontend"
 
         log_lines: list[str] = []
         errors: list[str] = []

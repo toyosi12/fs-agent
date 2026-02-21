@@ -21,7 +21,7 @@ def execute_agent(agent: BaseAgent, role: AgentRole, context: RunContext) -> Age
 
     logger.info("→ %s agent starting", role.value)
     result = agent.run(context)
-    saved_paths = persist_agent_output(result, context.artifact_dir)
+    saved_paths = persist_agent_output(result, context.metadata_dir)
     report = AgentReport(
         role=role.value,
         summary=result.summary,

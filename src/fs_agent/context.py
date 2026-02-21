@@ -67,6 +67,14 @@ class RunContext:
         slug = self._slugify(spec.metadata.name)
         return self.artifact_dir / "projects" / slug
 
+    @property
+    def metadata_dir(self) -> Path:
+        """Return the metadata subfolder inside the project directory.
+
+        Structure: <artifact_dir>/projects/<slug>/metadata/
+        """
+        return self.projects_dir / "metadata"
+
     @staticmethod
     def _slugify(value: str) -> str:
         value = value.lower()

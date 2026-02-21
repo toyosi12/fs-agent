@@ -244,7 +244,7 @@ class FrontendAgent(BaseAgent):
             "Return JSON only with this structure:\n"
             "{\n"
             "  \"tool\": \"mcp.fs\",\n"
-            "  \"project_root\": \"<slug>-frontend\",\n"
+            "  \"project_root\": \"frontend\",\n"
             "  \"instructions\": \"short summary\",\n"
             "  \"files\": [\n"
             "    {\n"
@@ -270,7 +270,7 @@ class FrontendAgent(BaseAgent):
             return fallback_plan
 
         plan.setdefault("tool", "mcp.fs")
-        plan.setdefault("project_root", f"{slug}-frontend")
+        plan.setdefault("project_root", "frontend")
         if not isinstance(plan.get("files"), list) or not plan["files"]:
             self.logger.warning("Frontend MCP plan missing files; using fallback")
             return fallback_plan
@@ -294,10 +294,9 @@ class FrontendAgent(BaseAgent):
         app_body: str,
     ) -> dict[str, Any]:
         files = self._default_project_files(spec, routes, backend_blueprint, app_body)
-        slug = self._slugify(spec.metadata.name)
         return {
             "tool": "mcp.fs",
-            "project_root": f"{slug}-frontend",
+            "project_root": "frontend",
             "instructions": f"Scaffold React frontend for {spec.metadata.name}",
             "files": [
                 {
@@ -316,7 +315,7 @@ class FrontendAgent(BaseAgent):
         backend_blueprint: dict[str, Any],
         app_body: str,
     ) -> dict[str, dict[str, str]]:
-        project_root = f"{self._slugify(spec.metadata.name)}-frontend"
+        project_root = "frontend"
         return {
             "README.md": {
                 "description": "Frontend overview and commands",
