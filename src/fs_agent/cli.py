@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from .context import AgentReport
 from .orchestrator import run_orchestration
@@ -33,6 +34,73 @@ def run(
         )
     )
     _print_summary(reports)
+
+
+@app.command()
+def benchmark(
+    dataset: Path = typer.Argument(
+        ..., help="Path to the tasks JSON file (e.g. dataset/tasks.json)"
+    ),
+    patterns: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated list of patterns to benchmark (default: all six)",
+    ),
+    task_ids: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated list of task IDs to run (default: all)",
+    ),
+    max_tasks: Optional[int] = typer.Option(
+        None,
+        help="Maximum number of tasks to process (useful for quick tests)",
+    ),
+    artifact_root: Path = typer.Option(
+        Path("artifacts") / "benchmark",
+        help="Root directory for benchmark outputs",
+    ),
+) -> None:
+    """Run the benchmark suite: every pattern against each task in the dataset."""
+
+    from .benchmark import run_benchmark
+
+    pat_list = [p.strip() for p in patterns.split(",")] if patterns else None
+    id_list = [i.strip() for i in task_ids.split(",")] if task_ids else None
+
+    results = run_benchmark(
+        dataset_path=dataset,
+        patterns=pat_list,
+        task_ids=id_list,
+        max_tasks=max_tasks,
+        artifact_root=artifact_root,
+    )
+
+    # Print a rich summary table
+    table = Table(title="Benchmark Results", show_lines=True)
+    table.add_column("Task ID", style="cyan", no_wrap=True)
+    table.add_column("Pattern", style="magenta")
+    table.add_column("Status", style="bold")
+    table.add_column("Wall Clock (s)", justify="right")
+    table.add_column("LLM Calls", justify="right")
+    table.add_column("Total Tokens", justify="right")
+    table.add_column("Overhead (s)", justify="right")
+    table.add_column("Agents", justify="right")
+
+    for m in results:
+        status = "[green]OK[/green]" if m.success else f"[red]FAIL[/red]"
+        table.add_row(
+            m.task_id,
+            m.pattern,
+            status,
+            f"{m.wall_clock_seconds:.2f}",
+            str(m.llm_call_count),
+            str(m.total_tokens),
+            f"{m.orchestration_overhead_seconds:.2f}",
+            str(m.agent_count),
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[bold green]Results written to:[/bold green] {artifact_root / 'results'}"
+    )
 
 
 def _print_summary(reports: Iterable[AgentReport]) -> None:
