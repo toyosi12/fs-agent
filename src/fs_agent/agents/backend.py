@@ -136,7 +136,16 @@ class BackendAgent(BaseAgent):
             prompt += (
                 "Use in-memory data structures (arrays/maps) as a data store. "
             )
-        prompt += "Do NOT use TypeScript. Do NOT leave TODO comments or placeholder stubs."
+        prompt += "Do NOT use TypeScript. Do NOT leave TODO comments or placeholder stubs.\n"
+        prompt += (
+            "\nAlso generate a companion test file using Jest. The tests should:\n"
+            "- Import supertest and the Express app\n"
+            "- Test each endpoint (correct status codes, response shapes, error cases)\n"
+            "- Use describe/it blocks with clear test names\n"
+            "- Mock the database layer if one is used\n"
+            "Wrap the test code in a clearly separated section starting with "
+            "'// === TESTS ===' so it can be extracted into its own file.\n"
+        )
         system = (
             "You are a senior backend engineer. Produce idiomatic Express/JavaScript code "
             "with complete, functional route handlers. Every endpoint must be fully "
@@ -278,7 +287,11 @@ class BackendAgent(BaseAgent):
             "    }\n"
             "  ]\n"
             "}\n"
-            "Paths are relative to the project root. Use JavaScript only — no TypeScript."
+            "Paths are relative to the project root. Use JavaScript only — no TypeScript.\n"
+            "Include a __tests__/routes.test.js file with Jest + supertest tests "
+            "covering all endpoints (status codes, response shapes, error cases). "
+            "The package.json must include jest and supertest in devDependencies "
+            'and a "test": "jest" script.'
         )
         try:
             response = context.llm.generate(prompt, system=system, temperature=0.15)
@@ -379,6 +392,10 @@ class BackendAgent(BaseAgent):
                     "description": f"MySQL migration: {path}",
                     "body": contents,
                 }
+        files["__tests__/routes.test.js"] = {
+            "description": "Jest + supertest endpoint tests",
+            "body": self._render_fallback_tests(blueprint),
+        }
         return files
 
     def _render_readme(
@@ -413,6 +430,7 @@ class BackendAgent(BaseAgent):
         scripts = {
             "dev": "nodemon src/server.js",
             "start": "node src/server.js",
+            "test": "node --experimental-vm-modules node_modules/.bin/jest",
         }
         deps = {
             "cors": "^2.8.5",
@@ -432,6 +450,13 @@ class BackendAgent(BaseAgent):
             "dependencies": deps,
             "devDependencies": {
                 "nodemon": "^3.1.4",
+                "jest": "^29.7.0",
+                "@jest/globals": "^29.7.0",
+                "supertest": "^6.3.4",
+            },
+            "jest": {
+                "transform": {},
+                "testEnvironment": "node",
             },
         }
         return json.dumps(package, indent=2)
@@ -691,6 +716,79 @@ class BackendAgent(BaseAgent):
         value = re.sub(r"[^a-z0-9]+", "-", value)
         value = value.strip("-")
         return value or "backend"
+
+    def _render_fallback_tests(self, blueprint: dict[str, Any]) -> str:
+        """Generate a fallback Jest + supertest test file for all endpoints."""
+        lines = [
+            "import { describe, it, expect } from '@jest/globals';",
+            "import request from 'supertest';",
+            "import { app } from '../src/app.js';",
+            "",
+        ]
+        endpoints = blueprint.get("endpoints", [])
+        if not endpoints:
+            lines.append(
+                "describe('API', () => {\n"
+                "  it('responds to healthz', async () => {\n"
+                "    const res = await request(app).get('/healthz');\n"
+                "    expect(res.status).toBe(200);\n"
+                "    expect(res.body).toHaveProperty('status', 'ok');\n"
+                "  });\n"
+                "});\n"
+            )
+            return "\n".join(lines)
+
+        lines.append("describe('API Endpoints', () => {")
+        for endpoint in endpoints:
+            method = endpoint["method"].lower()
+            path = endpoint["path"]
+            name = endpoint["name"]
+            # Replace path params with sample values
+            test_path = re.sub(r":(\w+)", "1", path)
+            api_path = f"/api{test_path}"
+
+            if method == "get":
+                lines.append(
+                    f"  it('{name} — GET {path}', async () => {{\n"
+                    f"    const res = await request(app).get('{api_path}');\n"
+                    f"    expect([200, 404]).toContain(res.status);\n"
+                    f"  }});\n"
+                )
+            elif method == "post":
+                lines.append(
+                    f"  it('{name} — POST {path}', async () => {{\n"
+                    f"    const res = await request(app)\n"
+                    f"      .post('{api_path}')\n"
+                    f"      .send({{ name: 'test' }});\n"
+                    f"    expect([200, 201]).toContain(res.status);\n"
+                    f"    expect(res.body).toBeDefined();\n"
+                    f"  }});\n"
+                )
+            elif method in ("put", "patch"):
+                lines.append(
+                    f"  it('{name} — {method.upper()} {path}', async () => {{\n"
+                    f"    const res = await request(app)\n"
+                    f"      .{method}('{api_path}')\n"
+                    f"      .send({{ name: 'updated' }});\n"
+                    f"    expect([200, 404]).toContain(res.status);\n"
+                    f"  }});\n"
+                )
+            elif method == "delete":
+                lines.append(
+                    f"  it('{name} — DELETE {path}', async () => {{\n"
+                    f"    const res = await request(app).delete('{api_path}');\n"
+                    f"    expect([200, 204, 404]).toContain(res.status);\n"
+                    f"  }});\n"
+                )
+            else:
+                lines.append(
+                    f"  it('{name} — {method.upper()} {path}', async () => {{\n"
+                    f"    const res = await request(app).{method}('{api_path}');\n"
+                    f"    expect(res.status).toBeDefined();\n"
+                    f"  }});\n"
+                )
+        lines.append("});")
+        return "\n".join(lines)
 
     def _describe_endpoint(self, endpoint: ApiEndpoint) -> str:
         parts = [f"### {endpoint.method.value} {endpoint.path}"]

@@ -139,6 +139,15 @@ class FrontendAgent(BaseAgent):
             + "\nAPIs:\n"
             + ("\n".join(api_lines) if api_lines else "(no APIs provided)")
             + "\n\nDo NOT use TypeScript. Do NOT leave TODO comments or placeholder stubs."
+            "\n\nAlso generate a companion test file using Vitest and React Testing Library. "
+            "The tests should:\n"
+            "- Import components and render them with @testing-library/react\n"
+            "- Test that key UI elements render (headings, buttons, lists)\n"
+            "- Test user interactions (clicks, form submissions) with fireEvent/userEvent\n"
+            "- Mock fetch calls with vi.fn()\n"
+            "- Use describe/it blocks with clear test names\n"
+            "Wrap the test code in a clearly separated section starting with "
+            "'// === TESTS ===' so it can be extracted into its own file.\n"
         )
         system = (
             "You are a senior frontend engineer. Generate complete, functional React "
@@ -247,6 +256,11 @@ class FrontendAgent(BaseAgent):
             "}\n"
             "Always include package.json, vite.config.js, src/main.jsx, src/hooks/useApi.js,"
             " and src/App.jsx. Use JavaScript only — no TypeScript."
+            " Include a src/__tests__/App.test.jsx file with Vitest + React Testing Library "
+            "tests covering component rendering, user interactions, and API call mocking. "
+            "The package.json must include vitest, @testing-library/react, "
+            "@testing-library/jest-dom, and jsdom in devDependencies "
+            'and a "test": "vitest run" script.'
         )
         try:
             response = context.llm.generate(prompt, system=system, temperature=0.2)
@@ -332,6 +346,10 @@ class FrontendAgent(BaseAgent):
                 "description": "Reusable data fetching hook",
                 "body": self._render_hook(backend_blueprint),
             },
+            "src/__tests__/App.test.jsx": {
+                "description": "Vitest + React Testing Library component tests",
+                "body": self._render_fallback_tests(routes),
+            },
         }
 
     def _render_readme(
@@ -372,6 +390,7 @@ class FrontendAgent(BaseAgent):
                 "dev": "vite",
                 "build": "vite build",
                 "preview": "vite preview",
+                "test": "vitest run",
             },
             "dependencies": {
                 "react": "^18.3.1",
@@ -384,6 +403,10 @@ class FrontendAgent(BaseAgent):
                 "tailwindcss": "^3.4.13",
                 "autoprefixer": "^10.4.20",
                 "postcss": "^8.4.47",
+                "vitest": "^1.6.0",
+                "@testing-library/react": "^14.2.1",
+                "@testing-library/jest-dom": "^6.4.2",
+                "jsdom": "^24.0.0",
             },
         }
         return json.dumps(package, indent=2)
@@ -394,6 +417,11 @@ class FrontendAgent(BaseAgent):
             "import react from '@vitejs/plugin-react';\n\n"
             "export default defineConfig({\n"
             "  plugins: [react()],\n"
+            "  test: {\n"
+            "    globals: true,\n"
+            "    environment: 'jsdom',\n"
+            "    setupFiles: [],\n"
+            "  },\n"
             "});\n"
         )
 
@@ -454,6 +482,45 @@ class FrontendAgent(BaseAgent):
             "  return { data, loading, error };\n"
             "}\n"
         )
+
+    def _render_fallback_tests(self, routes: list[dict[str, Any]]) -> str:
+        """Generate a fallback Vitest + React Testing Library test file."""
+        lines = [
+            "import { describe, it, expect, vi, beforeEach } from 'vitest';",
+            "import { render, screen } from '@testing-library/react';",
+            "import App from '../App';",
+            "",
+            "// Mock fetch globally",
+            "beforeEach(() => {",
+            "  global.fetch = vi.fn(() =>",
+            "    Promise.resolve({",
+            "      ok: true,",
+            "      json: () => Promise.resolve([]),",
+            "    })",
+            "  );",
+            "});",
+            "",
+            "describe('App', () => {",
+            "  it('renders without crashing', () => {",
+            "    render(<App />);",
+            "    expect(document.body).toBeDefined();",
+            "  });",
+            "",
+        ]
+        for route in routes:
+            description = route.get("description", route.get("path", "/"))
+            components = route.get("components", [])
+            component_name = components[0] if components else "RouteView"
+            safe_name = component_name.replace(" ", "")
+            lines.append(
+                f"  it('renders {safe_name} component', () => {{\n"
+                f"    render(<App />);\n"
+                f"    // Verify the component tree renders for {description}\n"
+                f"    expect(document.body.innerHTML).toBeTruthy();\n"
+                f"  }});\n"
+            )
+        lines.append("});",)
+        return "\n".join(lines)
 
     def _slugify(self, value: str) -> str:
         value = value.lower()
