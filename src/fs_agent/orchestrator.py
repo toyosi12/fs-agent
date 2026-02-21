@@ -9,7 +9,7 @@ from .config import Settings, get_settings
 from .context import AgentReport, RunContext
 from dotenv import load_dotenv
 from .logger import get_logger
-from .orchestration import AgentRegistry, CentralizedOrchestrator, SequentialOrchestrator, register_default_agents
+from .orchestration import AgentRegistry, CentralizedOrchestrator, DecentralizedOrchestrator, HierarchicalOrchestrator, SequentialOrchestrator, register_default_agents
 from .llm import BaseLLMClient, build_llm_client
 import os
 
@@ -45,11 +45,15 @@ def _resolve_settings(
 
 def _build_pattern(
     settings: Settings, registry: AgentRegistry, llm: BaseLLMClient
-) -> SequentialOrchestrator | CentralizedOrchestrator:
+) -> SequentialOrchestrator | CentralizedOrchestrator | DecentralizedOrchestrator | HierarchicalOrchestrator:
     if settings.orchestration_pattern == "sequential":
         return SequentialOrchestrator(registry=registry)
     if settings.orchestration_pattern == "centralized":
         return CentralizedOrchestrator(registry=registry, llm=llm)
+    if settings.orchestration_pattern == "decentralized":
+        return DecentralizedOrchestrator(registry=registry, llm=llm)
+    if settings.orchestration_pattern == "hierarchical":
+        return HierarchicalOrchestrator(registry=registry, llm=llm)
     raise ValueError(f"Unsupported orchestration pattern: {settings.orchestration_pattern}")
 
 
