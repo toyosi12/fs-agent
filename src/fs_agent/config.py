@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 class Settings(BaseModel):
     """Top-level runtime configuration."""
 
-    orchestration_pattern: Literal["sequential", "centralized", "decentralized", "hierarchical"] = "sequential"
+    orchestration_pattern: Literal["sequential", "centralized", "decentralized", "hierarchical", "parallel"] = "sequential"
     artifact_dir: Path = Field(default_factory=lambda: Path("artifacts"))
     dry_run: bool = False
     llm_provider: Literal["dummy", "openai", "auto"] = Field(
