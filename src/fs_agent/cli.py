@@ -20,6 +20,7 @@ def run(
     request: str = typer.Argument(..., help="Natural language description of the desired app"),
     artifact_dir: Path | None = typer.Option(None, help="Directory to store generated artifacts"),
     dry_run: bool = typer.Option(False, help="Skip shell-side effects and focus on planning"),
+    pattern: str = typer.Option("sequential", help="Orchestration pattern: sequential or centralized"),
 ) -> None:
     """Execute the orchestrator against a project spec."""
 
@@ -27,7 +28,8 @@ def run(
         run_orchestration(
             request,
             artifact_dir=artifact_dir,
-            dry_run=dry_run
+            dry_run=dry_run,
+            orchestration_pattern=pattern,
         )
     )
     _print_summary(reports)

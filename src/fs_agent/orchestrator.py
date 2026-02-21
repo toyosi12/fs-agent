@@ -9,7 +9,7 @@ from .config import Settings, get_settings
 from .context import AgentReport, RunContext
 from dotenv import load_dotenv
 from .logger import get_logger
-from .orchestration import AgentRegistry, SequentialOrchestrator, register_default_agents
+from .orchestration import AgentRegistry, CentralizedOrchestrator, SequentialOrchestrator, register_default_agents
 from .llm import BaseLLMClient, build_llm_client
 import os
 
@@ -24,6 +24,7 @@ llm_model = os.getenv("LLM_MODEL")
 def _resolve_settings(
     artifact_dir: Path | None,
     dry_run: bool | None,
+    orchestration_pattern: str | None = None,
 ) -> Settings:
     base = get_settings()
     update: dict[str, object] = {}
@@ -31,6 +32,8 @@ def _resolve_settings(
         update["artifact_dir"] = artifact_dir
     if dry_run is not None:
         update["dry_run"] = dry_run
+    if orchestration_pattern is not None:
+        update["orchestration_pattern"] = orchestration_pattern
     if llm_provider is not None:
         update["llm_provider"] = llm_provider
     if llm_model is not None:
@@ -40,9 +43,13 @@ def _resolve_settings(
     return base.model_copy(update=update)
 
 
-def _build_pattern(settings: Settings, registry: AgentRegistry) -> SequentialOrchestrator:
+def _build_pattern(
+    settings: Settings, registry: AgentRegistry, llm: BaseLLMClient
+) -> SequentialOrchestrator | CentralizedOrchestrator:
     if settings.orchestration_pattern == "sequential":
         return SequentialOrchestrator(registry=registry)
+    if settings.orchestration_pattern == "centralized":
+        return CentralizedOrchestrator(registry=registry, llm=llm)
     raise ValueError(f"Unsupported orchestration pattern: {settings.orchestration_pattern}")
 
 
@@ -50,13 +57,14 @@ def run_orchestration(
     user_request: str,
     *,
     artifact_dir: Path | None = None,
-    dry_run: bool | None = None
+    dry_run: bool | None = None,
+    orchestration_pattern: str | None = None,
 ) -> Iterable[AgentReport]:
     """Execute the configured orchestration pattern given a natural language brief."""
 
     get_settings.cache_clear()
 
-    settings = _resolve_settings(artifact_dir, dry_run=dry_run)
+    settings = _resolve_settings(artifact_dir, dry_run=dry_run, orchestration_pattern=orchestration_pattern)
     logger.info(
         "Starting orchestration pattern=%s request=%s artifact_dir=%s dry_run=%s",
         settings.orchestration_pattern,
@@ -78,7 +86,7 @@ def run_orchestration(
 
     registry = AgentRegistry()
     register_default_agents(registry)
-    pattern = _build_pattern(settings, registry)
+    pattern = _build_pattern(settings, registry, llm_client)
     logger.debug("Instantiated pattern %s", pattern.__class__.__name__)
     reports = pattern.run(context)
     logger.info(
