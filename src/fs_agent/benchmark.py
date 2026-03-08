@@ -21,7 +21,7 @@ from typing import Any, Sequence
 
 from .config import Settings, get_settings
 from .context import AgentReport, RunContext
-from .llm import BaseLLMClient, build_llm_client
+from .llm import BaseLLMClient, build_llm_client, build_llm_clients_from_env
 from .logger import get_logger
 from .orchestration import (
     AgentRegistry,
@@ -134,6 +134,7 @@ def run_single(
     artifact_dir: Path,
     settings: Settings,
     llm: BaseLLMClient,
+    llm_per_role: dict[str, BaseLLMClient] | None = None,
 ) -> RunMetrics:
     """Execute one (task × pattern) combination and return metrics."""
 
@@ -178,6 +179,9 @@ def run_single(
             }
         )
 
+        # Build per-role LLM overrides so agents pick up their
+        # individually-configured providers from the environment.
+
         context = RunContext(
             spec=None,
             user_request=instruction,
@@ -185,6 +189,7 @@ def run_single(
             workspace_dir=Path.cwd(),
             artifact_dir=run_artifact_dir,
             llm=llm,
+            llm_per_role=llm_per_role or {},
         )
 
         registry = AgentRegistry()
@@ -293,11 +298,11 @@ def run_benchmark(
     """
 
     from dotenv import load_dotenv
-    import os
 
     load_dotenv()
 
     get_settings.cache_clear()
+    base_settings = get_settings()
 
     patterns = patterns or list(ALL_PATTERNS)
     artifact_root = artifact_root or Path("artifacts") / "benchmark"
@@ -314,16 +319,13 @@ def run_benchmark(
         len(tasks), len(patterns), len(tasks) * len(patterns),
     )
 
-    # Build a shared LLM client (token counters get reset between runs)
-    base_settings = get_settings()
-    llm_provider = os.getenv("LLM_PROVIDER") or base_settings.llm_provider
-    llm_model = os.getenv("LLM_MODEL") or base_settings.llm_model
-    api_key = os.getenv("FS_AGENT_OPENAI_API_KEY") or base_settings.openai_api_key
-
-    try:
-        llm = build_llm_client(llm_provider, model=llm_model, api_key=api_key)
-    except Exception:
-        llm = build_llm_client("dummy", model=llm_model, api_key=None)
+    # Build shared + per-role LLM clients from env vars
+    llm, llm_per_role = build_llm_clients_from_env(
+        default_provider=base_settings.llm_provider,
+        default_model=base_settings.llm_model,
+        default_api_key=base_settings.openai_api_key,
+        default_base_url=base_settings.llm_base_url,
+    )
 
     all_metrics: list[RunMetrics] = []
 
@@ -340,6 +342,7 @@ def run_benchmark(
                 artifact_dir=artifact_root,
                 settings=base_settings,
                 llm=llm,
+                llm_per_role=llm_per_role,
             )
             all_metrics.append(metrics)
 

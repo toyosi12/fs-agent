@@ -10,7 +10,7 @@ from .context import AgentReport, RunContext
 from dotenv import load_dotenv
 from .logger import get_logger
 from .orchestration import AgentRegistry, CentralizedOrchestrator, DecentralizedOrchestrator, HierarchicalOrchestrator, IterativeRefinementOrchestrator, ParallelOrchestrator, SequentialOrchestrator, register_default_agents
-from .llm import BaseLLMClient, build_llm_client
+from .llm import BaseLLMClient, build_llm_client, build_llm_clients_from_env
 import os
 
 load_dotenv()
@@ -81,7 +81,7 @@ def run_orchestration(
         settings.dry_run,
     )
     settings.artifact_dir.mkdir(parents=True, exist_ok=True)
-    llm_client = _build_llm(settings)
+    llm_client, llm_per_role = _build_llms(settings)
 
     context = RunContext(
         spec=None,
@@ -90,6 +90,7 @@ def run_orchestration(
         workspace_dir=Path.cwd(),
         artifact_dir=settings.artifact_dir,
         llm=llm_client,
+        llm_per_role=llm_per_role,
     )
 
     registry = AgentRegistry()
@@ -105,13 +106,16 @@ def run_orchestration(
     return reports
 
 
-def _build_llm(settings: Settings) -> BaseLLMClient:
-    try:
-        return build_llm_client(
-            settings.llm_provider,
-            model=settings.llm_model,
-            api_key=settings.openai_api_key,
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.error("LLM client creation failed: %s; defaulting to dummy", exc)
-        return build_llm_client("dummy", model=settings.llm_model, api_key=None)
+def _build_llms(settings: Settings) -> tuple[BaseLLMClient, dict[str, BaseLLMClient]]:
+    """Create the shared LLM client plus any per-role overrides.
+
+    Delegates to :func:`build_llm_clients_from_env` in ``llm.py`` which is
+    the single source of truth for reading per-role env vars.
+    """
+
+    return build_llm_clients_from_env(
+        default_provider=settings.llm_provider,
+        default_model=settings.llm_model,
+        default_api_key=settings.openai_api_key,
+        default_base_url=settings.llm_base_url,
+    )

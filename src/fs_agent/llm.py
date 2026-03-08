@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 
-import httpx
+from openai import OpenAI
 
 from .logger import get_logger
 
@@ -79,63 +79,104 @@ class DummyLLMClient(BaseLLMClient):
         return result
 
 
-class OpenAILLMClient(BaseLLMClient):
-    """Minimal OpenAI Chat Completions client."""
+# Well-known base URLs for OpenAI-compatible providers.
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
-    def __init__(self, api_key: str, model: str, *, timeout: float = 500.0) -> None:
+
+class OpenAILLMClient(BaseLLMClient):
+    """OpenAI-compatible Chat Completions client (uses the official ``openai`` SDK).
+
+    Works with any provider that exposes an OpenAI-compatible API
+    (OpenAI, Alibaba DashScope / Qwen, etc.).
+    Pass *base_url* to point the SDK at a different host.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        base_url: str = OPENAI_BASE_URL,
+        timeout: float = 500.0,
+    ) -> None:
         super().__init__(model)
-        self.api_key = api_key
-        self._client = httpx.Client(timeout=timeout)
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+        )
 
     def generate(self, prompt: str, *, system: str | None = None, temperature: float = 0.2) -> str:
         messages: list[dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
+
         try:
-            response = self._client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": temperature,
-                },
+            completion = self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
             )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:  # pragma: no cover - network dependent
+        except Exception as exc:  # pragma: no cover - network dependent
             raise RuntimeError(f"OpenAI request failed: {exc}") from exc
 
-        payload = response.json()
-
         # Record token usage reported by the API
-        usage = payload.get("usage", {})
-        self._record_usage(
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens"),
-        )
+        if completion.usage:
+            self._record_usage(
+                prompt_tokens=completion.usage.prompt_tokens or 0,
+                completion_tokens=completion.usage.completion_tokens or 0,
+                total_tokens=completion.usage.total_tokens,
+            )
 
-        try:
-            return payload["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError) as exc:  # pragma: no cover - defensive
-            raise RuntimeError(f"Malformed OpenAI response: {payload}") from exc
+        content = completion.choices[0].message.content
+        if content is None:  # pragma: no cover - defensive
+            raise RuntimeError(f"Empty response from model: {completion}")
+        return content.strip()
 
 
-def build_llm_client(provider: str, *, model: str, api_key: str | None) -> BaseLLMClient:
-    """Factory helper based on provider settings."""
+def build_llm_client(
+    provider: str,
+    *,
+    model: str,
+    api_key: str | None,
+    base_url: str | None = None,
+) -> BaseLLMClient:
+    """Factory helper based on provider settings.
+
+    Supported providers:
+    - ``openai``  – targets *base_url* (default ``https://api.openai.com/v1``).
+    - ``qwen``    – targets Alibaba DashScope International's OpenAI-compatible
+                    gateway (``https://dashscope-intl.aliyuncs.com/compatible-mode/v1``).
+    - ``dummy``   – deterministic placeholder (no network calls).
+
+    An explicit *base_url* always takes precedence over the provider default.
+    """
 
     provider_lower = provider.lower()
-    if provider_lower == "openai":
+
+    if provider_lower in ("openai", "qwen"):
         if not api_key:
             logger.warning(
-                "OpenAI provider selected but no API key supplied; falling back to dummy LLM"
+                "%s provider selected but no API key supplied; falling back to dummy LLM",
+                provider,
             )
             return DummyLLMClient(model)
-        return OpenAILLMClient(api_key=api_key, model=model)
+
+        if base_url:
+            effective_url = base_url
+        elif provider_lower == "qwen":
+            effective_url = DASHSCOPE_BASE_URL
+        else:
+            effective_url = OPENAI_BASE_URL
+
+        return OpenAILLMClient(
+            api_key=api_key,
+            model=model,
+            base_url=effective_url,
+        )
+
     if provider_lower not in {"dummy", "auto"}:
         logger.warning("Unknown LLM provider '%s'; defaulting to dummy client", provider)
     return DummyLLMClient(model)
@@ -143,3 +184,91 @@ def build_llm_client(provider: str, *, model: str, api_key: str | None) -> BaseL
 
 def default_provider_from_env() -> str:
     return os.getenv("FS_AGENT_LLM_PROVIDER", "dummy")
+
+
+def build_llm_clients_from_env(
+    *,
+    default_provider: str = "",
+    default_model: str = "",
+    default_api_key: str | None = None,
+    default_base_url: str | None = None,
+) -> tuple[BaseLLMClient, dict[str, BaseLLMClient]]:
+    """Build a shared LLM client plus per-role overrides from environment variables.
+
+    This is the single source of truth for constructing the full set of LLM
+    clients.  Both the orchestrator and the benchmark runner should call this.
+
+    Global env vars (fallback for every role):
+    - ``FS_AGENT_LLM_PROVIDER``
+    - ``FS_AGENT_LLM_MODEL``
+    - ``FS_AGENT_LLM_BASE_URL``
+    - ``FS_AGENT_OPENAI_API_KEY``
+
+    Per-role overrides (``<ROLE>`` = ``ARCHITECT | BACKEND | FRONTEND | INFRA``):
+    - ``FS_AGENT_LLM_PROVIDER_<ROLE>``
+    - ``FS_AGENT_LLM_MODEL_<ROLE>``
+    - ``FS_AGENT_LLM_BASE_URL_<ROLE>``
+    - ``FS_AGENT_OPENAI_API_KEY_<ROLE>``
+
+    Returns ``(base_client, {role: client, ...})``.
+    """
+
+    eff_provider = default_provider or os.getenv("FS_AGENT_LLM_PROVIDER", "dummy")
+    eff_model = default_model or os.getenv("FS_AGENT_LLM_MODEL", "gpt-4o-mini")
+    eff_api_key = default_api_key or os.getenv("FS_AGENT_OPENAI_API_KEY")
+    eff_base_url = default_base_url or os.getenv("FS_AGENT_LLM_BASE_URL")
+
+    try:
+        base_llm = build_llm_client(
+            eff_provider,
+            model=eff_model,
+            api_key=eff_api_key,
+            base_url=eff_base_url,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error("LLM client creation failed: %s; defaulting to dummy", exc)
+        base_llm = build_llm_client("dummy", model=eff_model, api_key=None)
+
+    llm_per_role: dict[str, BaseLLMClient] = {}
+
+    for role in ("architect", "backend", "frontend", "infra"):
+        prefix = role.upper()
+        role_provider = os.getenv(f"FS_AGENT_LLM_PROVIDER_{prefix}")
+        role_model = os.getenv(f"FS_AGENT_LLM_MODEL_{prefix}")
+        role_base_url = os.getenv(f"FS_AGENT_LLM_BASE_URL_{prefix}")
+        role_api_key = os.getenv(f"FS_AGENT_OPENAI_API_KEY_{prefix}") or eff_api_key
+
+        # Nothing overridden — role will use the base client via get_llm().
+        if not role_provider and not role_model and not role_base_url and role_api_key == eff_api_key:
+            continue
+
+        r_provider = role_provider or eff_provider
+        r_model = role_model or eff_model
+        r_base_url = role_base_url or eff_base_url
+
+        # Matches the base client — just reuse it.
+        if (
+            r_provider == eff_provider
+            and r_model == eff_model
+            and r_base_url == eff_base_url
+            and role_api_key == eff_api_key
+        ):
+            llm_per_role[role] = base_llm
+            continue
+
+        try:
+            llm_per_role[role] = build_llm_client(
+                r_provider,
+                model=r_model,
+                api_key=role_api_key,
+                base_url=r_base_url,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "LLM client creation failed for role %s: %s; using base client",
+                role,
+                exc,
+            )
+            llm_per_role[role] = base_llm
+
+    return base_llm, llm_per_role

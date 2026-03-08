@@ -157,7 +157,12 @@ class BackendAgent(BaseAgent):
                 " Use mysql2/promise for all database access. Import the pool from '../db.js'."
             )
         try:
-            return context.llm.generate(prompt, system=system, temperature=0.1)
+            # Use backend-specific LLM if configured.
+            return context.get_llm("backend").generate(
+                prompt,
+                system=system,
+                temperature=0.1,
+            )
         except Exception as exc:  # pragma: no cover - defensive
             self.logger.warning("LLM generation failed for backend: %s", exc)
             return self._fallback_backend_code(blueprint)
@@ -294,7 +299,11 @@ class BackendAgent(BaseAgent):
             'and a "test": "jest" script.'
         )
         try:
-            response = context.llm.generate(prompt, system=system, temperature=0.15)
+            response = context.get_llm("backend").generate(
+                prompt,
+                system=system,
+                temperature=0.15,
+            )
             plan = self._parse_plan_response(response)
         except Exception as exc:  # pragma: no cover - LLM dependent
             self.logger.warning("Backend MCP plan generation failed; using fallback: %s", exc)
@@ -546,7 +555,11 @@ class BackendAgent(BaseAgent):
         )
 
         try:
-            raw = context.llm.generate(prompt, system=system, temperature=0.1)
+            raw = context.get_llm("backend").generate(
+                prompt,
+                system=system,
+                temperature=0.1,
+            )
             cleaned = self._strip_code_fences(raw).strip()
             result = json.loads(cleaned)
             if isinstance(result, dict) and result:

@@ -101,7 +101,13 @@ class ArchitectAgent(BaseAgent):
             "description, and runtime (docker|serverless|kubernetes).\n"
             "- Include at least two infra targets (dev and prod).\n"
         )
-        response = context.llm.generate(prompt, system=system, temperature=0.2)
+        # Allow a dedicated provider/model for the architect via
+        # FS_AGENT_LLM_PROVIDER_ARCHITECT / FS_AGENT_LLM_MODEL_ARCHITECT.
+        response = context.get_llm("architect").generate(
+            prompt,
+            system=system,
+            temperature=0.2,
+        )
         return self._strip_code_fences(response).strip()
 
     def _parse_json(self, text: str) -> dict[str, Any]:

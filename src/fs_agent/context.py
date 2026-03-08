@@ -37,6 +37,9 @@ class RunContext:
     workspace_dir: Path
     artifact_dir: Path
     llm: BaseLLMClient
+    # Optional per-role LLM overrides; keys are role names
+    # (e.g. "architect", "backend", "frontend", "infra").
+    llm_per_role: dict[str, BaseLLMClient] = field(default_factory=dict)
     transcripts: list[AgentReport] = field(default_factory=list)
 
     def record(self, report: AgentReport) -> None:
@@ -121,3 +124,18 @@ class RunContext:
             "metadata": spec.metadata.model_dump(mode="json"),
             "infra": spec.infra.model_dump(mode="json"),
         }
+
+    # ------------------------------------------------------------------
+    # LLM selection
+    # ------------------------------------------------------------------
+
+    def get_llm(self, role: str | None = None) -> BaseLLMClient:
+        """Return the LLM client for a given agent role.
+
+        If no role-specific client is configured, fall back to the shared
+        ``llm`` instance.
+        """
+
+        if role is None:
+            return self.llm
+        return self.llm_per_role.get(role, self.llm)

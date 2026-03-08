@@ -157,7 +157,12 @@ class FrontendAgent(BaseAgent):
             "No placeholders, no TODOs, no TypeScript syntax."
         )
         try:
-            return context.llm.generate(prompt, system=system, temperature=0.2)
+            # Use frontend-specific LLM if configured.
+            return context.get_llm("frontend").generate(
+                prompt,
+                system=system,
+                temperature=0.2,
+            )
         except Exception as exc:  # pragma: no cover - defensive
             self.logger.warning("LLM generation failed for frontend: %s", exc)
             return self._fallback_frontend_code(routes)
@@ -263,7 +268,11 @@ class FrontendAgent(BaseAgent):
             'and a "test": "vitest run" script.'
         )
         try:
-            response = context.llm.generate(prompt, system=system, temperature=0.2)
+            response = context.get_llm("frontend").generate(
+                prompt,
+                system=system,
+                temperature=0.2,
+            )
             plan = self._parse_plan_response(response)
         except Exception as exc:  # pragma: no cover - LLM dependent
             self.logger.warning("Frontend MCP plan generation failed; using fallback: %s", exc)
