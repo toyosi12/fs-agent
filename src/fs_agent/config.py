@@ -16,7 +16,7 @@ class Settings(BaseModel):
     orchestration_pattern: Literal["sequential", "centralized", "decentralized", "hierarchical", "parallel", "iterative"] = "sequential"
     artifact_dir: Path = Field(default_factory=lambda: Path("artifacts"))
     dry_run: bool = False
-    llm_provider: Literal["dummy", "openai", "qwen", "auto"] = Field(
+    llm_provider: Literal["dummy", "openai", "qwen", "ollama", "auto"] = Field(
         default_factory=lambda: os.getenv("FS_AGENT_LLM_PROVIDER", "dummy")
     )
     llm_model: str = Field(default_factory=lambda: os.getenv("FS_AGENT_LLM_MODEL", "gpt-4o-mini"))

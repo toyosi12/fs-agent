@@ -87,6 +87,7 @@ class DummyLLMClient(BaseLLMClient):
 # Well-known base URLs for OpenAI-compatible providers.
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
 
 class OpenAILLMClient(BaseLLMClient):
@@ -162,6 +163,7 @@ def build_llm_client(
     - ``openai``  – targets *base_url* (default ``https://api.openai.com/v1``).
     - ``qwen``    – targets Alibaba DashScope International's OpenAI-compatible
                     gateway (``https://dashscope-intl.aliyuncs.com/compatible-mode/v1``).
+    - ``ollama``  – targets local Ollama instance (``http://localhost:11434/v1``).
     - ``dummy``   – deterministic placeholder (no network calls).
 
     An explicit *base_url* always takes precedence over the provider default.
@@ -169,8 +171,8 @@ def build_llm_client(
 
     provider_lower = provider.lower()
 
-    if provider_lower in ("openai", "qwen"):
-        if not api_key:
+    if provider_lower in ("openai", "qwen", "ollama"):
+        if not api_key and provider_lower != "ollama":
             logger.warning(
                 "%s provider selected but no API key supplied; falling back to dummy LLM",
                 provider,
@@ -181,11 +183,13 @@ def build_llm_client(
             effective_url = base_url
         elif provider_lower == "qwen":
             effective_url = DASHSCOPE_BASE_URL
+        elif provider_lower == "ollama":
+            effective_url = OLLAMA_BASE_URL
         else:
             effective_url = OPENAI_BASE_URL
 
         return OpenAILLMClient(
-            api_key=api_key,
+            api_key=api_key or "ollama",  # Ollama doesn't need real API key
             model=model,
             base_url=effective_url,
         )

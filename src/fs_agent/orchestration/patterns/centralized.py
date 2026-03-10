@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Iterable, Sequence
+from typing import Sequence
 
 from ...context import AgentReport, RunContext
 from ...llm import BaseLLMClient

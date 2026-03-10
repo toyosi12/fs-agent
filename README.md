@@ -53,11 +53,12 @@ pip install -e .[dev]
 Create a `.env` file in the project root (auto-loaded via `python-dotenv`):
 
 ```env
-FS_AGENT_LLM_PROVIDER=openai      # or "dummy" for placeholder output
-FS_AGENT_OPENAI_API_KEY=sk-...     # required when provider is openai
-FS_AGENT_LLM_MODEL=gpt-4o-mini    # any OpenAI chat model
-LLM_PROVIDER=openai               # alternative env var name
-LLM_MODEL=gpt-4o-mini             # alternative env var name
+FS_AGENT_LLM_PROVIDER=ollama     # or "openai", "qwen", "dummy"
+FS_AGENT_OPENAI_API_KEY=sk-...   # required when provider is openai/qwen, optional for ollama
+FS_AGENT_LLM_MODEL=llama3.1:8b   # any Ollama model or OpenAI model
+FS_AGENT_LLM_BASE_URL=http://localhost:11434/v1  # optional, overrides default
+LLM_PROVIDER=ollama              # alternative env var name
+LLM_MODEL=llama3.1:8b           # alternative env var name
 ```
 
 If no API key is set, the system falls back to a deterministic dummy LLM.

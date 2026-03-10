@@ -85,7 +85,7 @@ def benchmark(
     table.add_column("Agents", justify="right")
 
     for m in results:
-        status = "[green]OK[/green]" if m.success else f"[red]FAIL[/red]"
+        status = "[green]OK[/green]" if m.success else "[red]FAIL[/red]"
         table.add_row(
             m.task_id,
             m.pattern,
