@@ -1,4 +1,3 @@
-import os
 from openai import OpenAI
 
 # Note: The base_url varies by region. The following example uses the base_url for the Singapore region.

@@ -7,10 +7,10 @@ from typing import Iterable
 
 from .config import Settings, get_settings
 from .context import AgentReport, RunContext
-from dotenv import load_dotenv
 from .logger import get_logger
 from .orchestration import AgentRegistry, CentralizedOrchestrator, DecentralizedOrchestrator, HierarchicalOrchestrator, ParallelOrchestrator, SequentialOrchestrator, register_default_agents
 from .llm import BaseLLMClient, build_llm_client, build_llm_clients_from_env
+from dotenv import load_dotenv
 import os
 
 load_dotenv()

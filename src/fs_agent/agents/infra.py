@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from ..context import RunContext
 from .base import AgentArtifact, AgentResult, AgentRole, BaseAgent
