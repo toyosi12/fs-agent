@@ -1,14 +1,22 @@
-"""Iterative refinement orchestration pattern — critic-driven retry loop."""
+"""Iterative refinement orchestration pattern — critic-driven retry loop.
+
+Each agent runs, then an LLM critic evaluates quality.  If the critic
+says the output is insufficient the agent is re-run (up to ``max_retries``
+times).  **No fallbacks** — if the critic LLM call fails the run is
+aborted with :class:`OrchestrationError`.
+"""
 
 from __future__ import annotations
 
 import json
-from typing import Iterable
+import time
+from typing import Sequence
 
 from ...context import AgentReport, RunContext
 from ...llm import BaseLLMClient
 from ...logger import get_logger
-from ..base import OrchestrationPattern
+from ..base import OrchestrationError, OrchestrationPattern
+from ..metrics import CoordinationCall
 from ..registry import AgentRegistry
 from ...agents.base import AgentRole
 from .._helpers import execute_agent
@@ -50,18 +58,20 @@ class IterativeRefinementOrchestrator(OrchestrationPattern):
     """Run each agent, then ask an LLM critic to evaluate quality.
 
     If the critic says the output is insufficient the agent is re-run
-    (up to ``max_retries`` times).  The critic prompt includes role-
-    specific quality criteria so the evaluation is focused.
+    (up to ``max_retries`` times).
 
     Flow for each agent::
 
         attempt 1: run agent → critic evaluates → pass / fail
         attempt 2 (if fail): re-run agent → critic → pass / fail
         ...
-        attempt N: accept regardless (max retries exhausted)
+        attempt N+1: accept regardless (max retries exhausted)
 
     Agents are dispatched in canonical order (architect → backend →
     frontend → infra).  The critic is an LLM prompt, not an agent.
+
+    **Research mode**: all fallbacks removed — critic failures raise
+    :class:`OrchestrationError`.
     """
 
     CANONICAL_ORDER = [
@@ -91,24 +101,39 @@ class IterativeRefinementOrchestrator(OrchestrationPattern):
     # Public entry point
     # ------------------------------------------------------------------
 
-    def run(self, context: RunContext) -> Iterable[AgentReport]:
+    def run(self, context: RunContext) -> Sequence[AgentReport]:
+        m = context.metrics
+        m.pattern = "iterative"
+        m.task_id = getattr(context.settings, "task_id", "")
+        m.start_timer()
+
         all_reports: list[AgentReport] = []
 
         self.logger.info(
-            "Iterative refinement orchestrator starting "
-            "(max_retries=%d, pass_threshold=%d/10)",
+            "╔══ ITERATIVE REFINEMENT ORCHESTRATOR START ══╗  "
+            "max_retries=%d  pass_threshold=%d/10",
             self.max_retries,
             self.pass_threshold,
         )
 
-        for role in self.CANONICAL_ORDER:
-            report = self._run_with_refinement(role, context)
-            all_reports.append(report)
+        try:
+            for role in self.CANONICAL_ORDER:
+                report = self._run_with_refinement(role, context)
+                all_reports.append(report)
 
-        self.logger.info(
-            "Iterative refinement orchestrator complete: %d stages",
-            len(all_reports),
-        )
+            m.success = True
+
+        except OrchestrationError:
+            m.success = False
+            raise
+        except Exception as exc:
+            m.success = False
+            m.error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            m.stop_timer()
+            self._log_summary(m, all_reports)
+
         return all_reports
 
     # ------------------------------------------------------------------
@@ -119,14 +144,14 @@ class IterativeRefinementOrchestrator(OrchestrationPattern):
         self, role: AgentRole, context: RunContext
     ) -> AgentReport:
         """Run an agent up to (1 + max_retries) times until the critic passes it."""
-
+        m = context.metrics
         best_report: AgentReport | None = None
 
         for attempt in range(1, self.max_retries + 2):  # +2 because range is exclusive
             is_last = attempt > self.max_retries
 
             self.logger.info(
-                "Agent '%s' attempt %d/%d",
+                "── [%s] attempt %d/%d ──────────────────────────────────────",
                 role.value,
                 attempt,
                 self.max_retries + 1,
@@ -139,32 +164,40 @@ class IterativeRefinementOrchestrator(OrchestrationPattern):
                 ]
 
             agent = self.registry.build(role)
-            report = execute_agent(agent, role, context)
+            report, execution = execute_agent(agent, role, context, attempt=attempt)
+            m.record_agent_execution(execution)
             best_report = report
 
             if is_last:
                 self.logger.info(
-                    "Agent '%s' accepted (max retries exhausted)", role.value
+                    "  [%s] accepted (max retries exhausted at attempt %d)",
+                    role.value,
+                    attempt,
                 )
                 break
 
-            # Ask the critic
-            verdict = self._evaluate(role, report, context)
+            # Ask the critic — NO FALLBACK
+            verdict, coord_call = self._evaluate(role, report, context, attempt)
+            m.record_coordination_call(coord_call)
+
             score = verdict.get("score", 0)
             feedback = verdict.get("feedback", "")
             passed = score >= self.pass_threshold
 
             self.logger.info(
-                "Critic verdict for '%s': score=%d/10 pass=%s feedback=%s",
+                "  critic verdict for '%s': score=%d/10  pass=%s  "
+                "tokens=%d  latency=%.2fs  feedback=%s",
                 role.value,
                 score,
                 passed,
-                feedback[:150],
+                coord_call.total_tokens,
+                coord_call.latency_seconds,
+                str(feedback)[:150],
             )
 
             if passed:
                 self.logger.info(
-                    "Agent '%s' passed critic on attempt %d", role.value, attempt
+                    "  [%s] passed critic on attempt %d", role.value, attempt
                 )
                 break
 
@@ -176,27 +209,74 @@ class IterativeRefinementOrchestrator(OrchestrationPattern):
         return best_report
 
     # ------------------------------------------------------------------
-    # Critic LLM interaction
+    # Critic LLM interaction — NO FALLBACK
     # ------------------------------------------------------------------
 
     def _evaluate(
-        self, role: AgentRole, report: AgentReport, context: RunContext
-    ) -> dict[str, object]:
-        """Ask the LLM critic to score the agent's output."""
+        self,
+        role: AgentRole,
+        report: AgentReport,
+        context: RunContext,
+        attempt: int,
+    ) -> tuple[dict[str, object], CoordinationCall]:
+        """Ask the LLM critic to score the agent's output.
+
+        Returns ``(parsed_verdict, CoordinationCall)``.
+        Raises :class:`OrchestrationError` on any failure.
+        """
         prompt = self._build_critic_prompt(role, report, context)
         system = (
             "You are a strict quality critic for a multi-agent code-generation system. "
             "Evaluate the agent's output against the provided criteria. "
             "Respond with JSON only — no markdown fences, no commentary."
         )
+
+        self.logger.debug(
+            "  critic prompt for '%s' (%d chars):\n%s",
+            role.value, len(prompt), prompt[:500],
+        )
+
+        pre = self.llm.usage_stats.copy()
+        t0 = time.perf_counter()
+
         try:
             raw = self.llm.generate(prompt, system=system, temperature=0.0)
-            return self._parse_verdict(raw)
         except Exception as exc:
-            self.logger.warning(
-                "Critic LLM call failed (%s); defaulting to pass", exc
-            )
-            return {"score": 10, "feedback": "critic unavailable — auto-pass"}
+            raise OrchestrationError(
+                "iterative",
+                f"Critic LLM call failed for agent '{role.value}' "
+                f"attempt {attempt}: {exc}",
+                context={"role": role.value, "attempt": attempt},
+            ) from exc
+
+        latency = time.perf_counter() - t0
+        post = self.llm.usage_stats
+
+        self.logger.debug("  critic raw response:\n%s", raw[:500])
+
+        try:
+            verdict = self._parse_verdict(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise OrchestrationError(
+                "iterative",
+                f"Critic returned unparseable response for agent '{role.value}' "
+                f"attempt {attempt}: {exc}",
+                context={"role": role.value, "attempt": attempt,
+                         "raw_response": raw[:500]},
+            ) from exc
+
+        coord_call = CoordinationCall(
+            purpose=f"critic_{role.value}_attempt_{attempt}",
+            prompt_tokens=post["prompt_tokens"] - pre["prompt_tokens"],
+            completion_tokens=post["completion_tokens"] - pre["completion_tokens"],
+            total_tokens=post["total_tokens"] - pre["total_tokens"],
+            latency_seconds=round(latency, 4),
+            raw_response=raw,
+            parsed_result=dict(verdict),
+            iteration=attempt,
+        )
+
+        return verdict, coord_call
 
     def _build_critic_prompt(
         self,
@@ -251,3 +331,31 @@ class IterativeRefinementOrchestrator(OrchestrationPattern):
         else:
             data["score"] = 1
         return data
+
+    # ------------------------------------------------------------------
+    # Logging
+    # ------------------------------------------------------------------
+
+    def _log_summary(self, m: object, reports: list[AgentReport]) -> None:
+        self.logger.info(
+            "╚══ ITERATIVE REFINEMENT ORCHESTRATOR END ════╝\n"
+            "  success=%s  duration=%.2fs  agents_run=%d\n"
+            "  coordination_calls=%d (critic evaluations)  "
+            "coordination_tokens=%d  (prompt=%d, completion=%d)\n"
+            "  functional_tokens=%d  (prompt=%d, completion=%d)\n"
+            "  coordination/functional ratio=%.4f\n"
+            "  total_tokens=%d  est_cost=$%.6f",
+            m.success,
+            m.total_duration_seconds,
+            m.agent_execution_count,
+            m.coordination_call_count,
+            m.coordination_total_tokens,
+            m.coordination_prompt_tokens,
+            m.coordination_completion_tokens,
+            m.functional_total_tokens,
+            m.functional_prompt_tokens,
+            m.functional_completion_tokens,
+            m.coordination_to_functional_ratio,
+            m.total_tokens,
+            m.cost_estimate(),
+        )

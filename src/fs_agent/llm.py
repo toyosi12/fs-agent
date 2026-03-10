@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from abc import ABC, abstractmethod
 
 from openai import OpenAI
@@ -10,6 +11,10 @@ from openai import OpenAI
 from .logger import get_logger
 
 logger = get_logger(__name__)
+
+# Regex to strip Qwen3-style <think>...</think> reasoning blocks.
+# These appear at the start of the response before the actual content.
+_THINK_PATTERN = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
 class BaseLLMClient(ABC):
@@ -133,7 +138,15 @@ class OpenAILLMClient(BaseLLMClient):
         content = completion.choices[0].message.content
         if content is None:  # pragma: no cover - defensive
             raise RuntimeError(f"Empty response from model: {completion}")
-        return content.strip()
+
+        # Strip Qwen3 <think>...</think> reasoning blocks so callers
+        # receive only the actionable response content.
+        cleaned = _THINK_PATTERN.sub("", content).strip()
+        if not cleaned:
+            # Model returned only thinking with no actual response
+            logger.warning("Model returned only <think> content; raw length=%d", len(content))
+            raise RuntimeError(f"Empty response after stripping <think> block (raw length={len(content)})")
+        return cleaned
 
 
 def build_llm_client(

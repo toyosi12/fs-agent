@@ -5,13 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import re
 
 from .config import Settings
 from .llm import BaseLLMClient
 from .models.spec import ProjectSpec
+
+if TYPE_CHECKING:
+    from .orchestration.metrics import OrchestrationMetrics
 
 
 @dataclass
@@ -25,6 +28,12 @@ class AgentReport:
     started_at: datetime
     finished_at: datetime
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _make_metrics() -> OrchestrationMetrics:
+    """Deferred factory to avoid circular import with orchestration.metrics."""
+    from .orchestration.metrics import OrchestrationMetrics as _OM
+    return _OM()
 
 
 @dataclass
@@ -41,6 +50,8 @@ class RunContext:
     # (e.g. "architect", "backend", "frontend", "infra").
     llm_per_role: dict[str, BaseLLMClient] = field(default_factory=dict)
     transcripts: list[AgentReport] = field(default_factory=list)
+    # Populated by the orchestration pattern during a run.
+    metrics: OrchestrationMetrics = field(default_factory=lambda: _make_metrics())
 
     def record(self, report: AgentReport) -> None:
         self.transcripts.append(report)

@@ -1,14 +1,21 @@
-"""Decentralized orchestration pattern — agent-driven handoff routing."""
+"""Decentralized orchestration pattern — agent-driven handoff routing.
+
+Each completing agent decides who runs next via an LLM handoff call.
+**No fallbacks** — if a handoff fails or returns an invalid agent the
+run is aborted with :class:`OrchestrationError`.
+"""
 
 from __future__ import annotations
 
 import json
-from typing import Iterable
+import time
+from typing import Sequence
 
 from ...context import AgentReport, RunContext
 from ...llm import BaseLLMClient
 from ...logger import get_logger
-from ..base import OrchestrationPattern
+from ..base import OrchestrationError, OrchestrationPattern
+from ..metrics import CoordinationCall
 from ..registry import AgentRegistry
 from ...agents.base import AgentRole
 from .._helpers import execute_agent
@@ -17,15 +24,15 @@ from .._helpers import execute_agent
 class DecentralizedOrchestrator(OrchestrationPattern):
     """Each agent decides who runs next via an LLM handoff call.
 
-    Unlike the centralized pattern (which uses a global coordinator loop),
-    routing intelligence is distributed: after every agent completes, the
+    Routing intelligence is distributed: after every agent completes, the
     orchestrator asks the *outgoing* agent's LLM "given what you just
-    produced, who should handle this next?"  The handoff response drives
-    the next dispatch.
+    produced, who should handle this next?"
 
-    The seed agent is always ``architect`` (it depends only on the user
-    request).  Execution continues until an agent hands off to ``"done"``,
-    all agents have run, or the max-iterations guard fires.
+    The seed agent is always ``architect``.  Execution continues until an
+    agent hands off to ``"done"`` or all agents have run.
+
+    **Research mode**: all fallbacks removed — failures raise
+    :class:`OrchestrationError`.
     """
 
     MAX_ITERATIONS = 10
@@ -47,95 +54,131 @@ class DecentralizedOrchestrator(OrchestrationPattern):
     # Public entry point
     # ------------------------------------------------------------------
 
-    def run(self, context: RunContext) -> Iterable[AgentReport]:
+    def run(self, context: RunContext) -> Sequence[AgentReport]:
+        m = context.metrics
+        m.pattern = "decentralized"
+        m.task_id = getattr(context.settings, "task_id", "")
+        m.start_timer()
+
         reports: list[AgentReport] = []
         completed: set[str] = set()
         all_roles = [role.value for role in AgentRole]
 
         self.logger.info(
-            "Decentralized orchestrator starting (max %d iterations, agents: %s)",
+            "╔══ DECENTRALIZED ORCHESTRATOR START ══╗  max_iterations=%d  agents=%s",
             self.max_iterations,
             ", ".join(all_roles),
         )
 
-        # --- Seed: always start with the architect ---
         current_role = self.SEED_ROLE
 
-        for iteration in range(1, self.max_iterations + 1):
-            if current_role.value in completed:
+        try:
+            for iteration in range(1, self.max_iterations + 1):
                 self.logger.info(
-                    "Agent '%s' already ran; running remaining sequentially",
-                    current_role.value,
-                )
-                reports.extend(self._run_remaining(context, completed))
-                break
-
-            self.logger.info(
-                "Iteration %d — running agent '%s'",
-                iteration,
-                current_role.value,
-            )
-
-            # Dispatch the current agent
-            agent = self.registry.build(current_role)
-            report = execute_agent(agent, current_role, context)
-            reports.append(report)
-            completed.add(current_role.value)
-
-            # Check if all agents have run
-            if completed >= set(all_roles):
-                self.logger.info("All agents completed after %d iterations", iteration)
-                break
-
-            # Ask the just-completed agent for a handoff decision
-            handoff = self._ask_handoff(current_role, report, all_roles, completed)
-            next_agent = handoff.get("next", "done")
-            reason = handoff.get("reason", "")
-
-            self.logger.info(
-                "Iteration %d — handoff from '%s': next=%s reason=%s",
-                iteration,
-                current_role.value,
-                next_agent,
-                reason[:120],
-            )
-
-            if next_agent == "done":
-                self.logger.info(
-                    "Agent '%s' signalled done after %d iterations: %s",
-                    current_role.value,
+                    "── iteration %d/%d ──────────────────────────────────────────",
                     iteration,
-                    reason,
+                    self.max_iterations,
                 )
-                # Run any remaining agents that haven't been dispatched
-                remaining = self._run_remaining(context, completed)
-                reports.extend(remaining)
-                break
 
-            # Resolve the handoff target
-            try:
-                current_role = AgentRole(next_agent)
-            except ValueError:
-                self.logger.warning(
-                    "Handoff returned unknown agent '%s'; running remaining sequentially",
+                # Already-ran guard — NO FALLBACK
+                if current_role.value in completed:
+                    raise OrchestrationError(
+                        "decentralized",
+                        f"Handoff cycle detected: agent '{current_role.value}' "
+                        f"was selected again.  Completed so far: {sorted(completed)}",
+                        context={"iteration": iteration, "completed": sorted(completed)},
+                    )
+
+                self.logger.info(
+                    "  dispatching agent '%s'",
+                    current_role.value,
+                )
+
+                # Dispatch the current agent
+                agent = self.registry.build(current_role)
+                report, execution = execute_agent(agent, current_role, context)
+                m.record_agent_execution(execution)
+                reports.append(report)
+                completed.add(current_role.value)
+
+                # All agents done?
+                if completed >= set(all_roles):
+                    self.logger.info(
+                        "  all agents completed after %d iterations", iteration
+                    )
+                    break
+
+                # Ask for a handoff decision
+                handoff, coord_call = self._ask_handoff(
+                    current_role, report, all_roles, completed, iteration
+                )
+                m.record_coordination_call(coord_call)
+
+                next_agent = handoff.get("next", "done")
+                reason = handoff.get("reason", "")
+
+                self.logger.info(
+                    "  handoff from '%s': next=%s  reason=%s  tokens=%d  latency=%.2fs",
+                    current_role.value,
                     next_agent,
+                    reason[:120],
+                    coord_call.total_tokens,
+                    coord_call.latency_seconds,
                 )
-                reports.extend(self._run_remaining(context, completed))
-                break
-        else:
-            self.logger.warning(
-                "Hit max iterations (%d); running remaining agents sequentially",
-                self.max_iterations,
-            )
-            reports.extend(self._run_remaining(context, completed))
 
-        self.logger.info(
-            "Decentralized orchestrator complete: %d stages executed", len(reports)
-        )
+                if next_agent == "done":
+                    self.logger.info(
+                        "  agent '%s' signalled DONE at iteration %d: %s",
+                        current_role.value,
+                        iteration,
+                        reason,
+                    )
+                    # Verify all agents were run
+                    not_run = set(all_roles) - completed
+                    if not_run:
+                        raise OrchestrationError(
+                            "decentralized",
+                            f"Handoff signalled 'done' but agents {sorted(not_run)} "
+                            f"never ran.  Completed: {sorted(completed)}",
+                            context={"iteration": iteration, "not_run": sorted(not_run)},
+                        )
+                    break
+
+                # Resolve the handoff target — NO FALLBACK
+                try:
+                    current_role = AgentRole(next_agent)
+                except ValueError:
+                    raise OrchestrationError(
+                        "decentralized",
+                        f"Handoff returned unknown agent '{next_agent}' "
+                        f"(valid: {all_roles})",
+                        context={"iteration": iteration, "raw_handoff": handoff},
+                    )
+            else:
+                raise OrchestrationError(
+                    "decentralized",
+                    f"Hit max iterations ({self.max_iterations}) without completing.  "
+                    f"Agents completed: {sorted(completed)}",
+                    context={"max_iterations": self.max_iterations},
+                )
+
+            m.success = True
+
+        except OrchestrationError:
+            m.success = False
+            raise
+        except Exception as exc:
+            m.success = False
+            m.error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            m.stop_timer()
+            self._log_summary(m, reports)
+
         return reports
 
     # ------------------------------------------------------------------
-    # Handoff LLM interaction
+    # Handoff LLM interaction — NO FALLBACK
     # ------------------------------------------------------------------
 
     def _ask_handoff(
@@ -144,8 +187,13 @@ class DecentralizedOrchestrator(OrchestrationPattern):
         report: AgentReport,
         all_roles: list[str],
         completed: set[str],
-    ) -> dict[str, str]:
-        """Ask the LLM who should run next based on the just-completed agent's output."""
+        iteration: int,
+    ) -> tuple[dict[str, str], CoordinationCall]:
+        """Ask the LLM who should run next.
+
+        Returns ``(parsed_handoff, CoordinationCall)``.
+        Raises :class:`OrchestrationError` on any failure.
+        """
         prompt = self._build_handoff_prompt(completed_role, report, all_roles, completed)
         system = (
             "You are a routing advisor for a multi-agent code-generation system. "
@@ -153,14 +201,51 @@ class DecentralizedOrchestrator(OrchestrationPattern):
             "decide which agent should run next — or if the pipeline is done. "
             "Respond with JSON only — no markdown fences, no commentary."
         )
+
+        self.logger.debug(
+            "  handoff prompt (%d chars):\n%s", len(prompt), prompt[:500]
+        )
+
+        pre = self.llm.usage_stats.copy()
+        t0 = time.perf_counter()
+
         try:
             raw = self.llm.generate(prompt, system=system, temperature=0.0)
-            return self._parse_handoff(raw)
         except Exception as exc:
-            self.logger.warning(
-                "Handoff LLM call failed (%s); using fallback order", exc
-            )
-            return self._fallback_handoff(completed)
+            raise OrchestrationError(
+                "decentralized",
+                f"Handoff LLM call failed after agent '{completed_role.value}' "
+                f"at iteration {iteration}: {exc}",
+                context={"iteration": iteration, "from_agent": completed_role.value},
+            ) from exc
+
+        latency = time.perf_counter() - t0
+        post = self.llm.usage_stats
+
+        self.logger.debug("  handoff raw response:\n%s", raw[:500])
+
+        try:
+            handoff = self._parse_handoff(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise OrchestrationError(
+                "decentralized",
+                f"Handoff returned unparseable response after agent "
+                f"'{completed_role.value}' at iteration {iteration}: {exc}",
+                context={"iteration": iteration, "raw_response": raw[:500]},
+            ) from exc
+
+        coord_call = CoordinationCall(
+            purpose=f"handoff_from_{completed_role.value}_iter_{iteration}",
+            prompt_tokens=post["prompt_tokens"] - pre["prompt_tokens"],
+            completion_tokens=post["completion_tokens"] - pre["completion_tokens"],
+            total_tokens=post["total_tokens"] - pre["total_tokens"],
+            latency_seconds=round(latency, 4),
+            raw_response=raw,
+            parsed_result=handoff,
+            iteration=iteration,
+        )
+
+        return handoff, coord_call
 
     def _build_handoff_prompt(
         self,
@@ -192,7 +277,6 @@ class DecentralizedOrchestrator(OrchestrationPattern):
     def _parse_handoff(self, raw: str) -> dict[str, str]:
         """Parse the handoff JSON response."""
         text = raw.strip()
-        # Strip markdown code fences if present
         if text.startswith("```"):
             parts = text.split("```", 2)
             if len(parts) >= 2:
@@ -202,32 +286,32 @@ class DecentralizedOrchestrator(OrchestrationPattern):
         text = text.strip()
         data = json.loads(text)
         if not isinstance(data, dict) or "next" not in data:
-            raise ValueError(f"Invalid handoff response: {data}")
+            raise ValueError(f"Invalid handoff response (missing 'next'): {data}")
         return data
 
     # ------------------------------------------------------------------
-    # Fallbacks
+    # Logging
     # ------------------------------------------------------------------
 
-    def _fallback_handoff(self, completed: set[str]) -> dict[str, str]:
-        """Deterministic fallback: pick the next agent in canonical order."""
-        canonical = [AgentRole.ARCHITECT, AgentRole.BACKEND, AgentRole.FRONTEND, AgentRole.INFRA]
-        for role in canonical:
-            if role.value not in completed:
-                return {"next": role.value, "reason": "fallback order"}
-        return {"next": "done", "reason": "all agents completed (fallback)"}
-
-    def _run_remaining(
-        self, context: RunContext, completed: set[str]
-    ) -> list[AgentReport]:
-        """Run any agents that haven't executed yet, in canonical order."""
-        canonical = [AgentRole.ARCHITECT, AgentRole.BACKEND, AgentRole.FRONTEND, AgentRole.INFRA]
-        reports: list[AgentReport] = []
-        for role in canonical:
-            if role.value in completed:
-                continue
-            agent = self.registry.build(role)
-            report = execute_agent(agent, role, context)
-            reports.append(report)
-            completed.add(role.value)
-        return reports
+    def _log_summary(self, m: object, reports: list[AgentReport]) -> None:
+        self.logger.info(
+            "╚══ DECENTRALIZED ORCHESTRATOR END ════╝\n"
+            "  success=%s  duration=%.2fs  agents_run=%d\n"
+            "  coordination_calls=%d  coordination_tokens=%d  (prompt=%d, completion=%d)\n"
+            "  functional_tokens=%d  (prompt=%d, completion=%d)\n"
+            "  coordination/functional ratio=%.4f\n"
+            "  total_tokens=%d  est_cost=$%.6f",
+            m.success,
+            m.total_duration_seconds,
+            m.agent_execution_count,
+            m.coordination_call_count,
+            m.coordination_total_tokens,
+            m.coordination_prompt_tokens,
+            m.coordination_completion_tokens,
+            m.functional_total_tokens,
+            m.functional_prompt_tokens,
+            m.functional_completion_tokens,
+            m.coordination_to_functional_ratio,
+            m.total_tokens,
+            m.cost_estimate(),
+        )

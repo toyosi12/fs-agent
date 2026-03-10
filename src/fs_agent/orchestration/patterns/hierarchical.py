@@ -1,15 +1,23 @@
-"""Hierarchical orchestration pattern — two-level supervisor tree."""
+"""Hierarchical orchestration pattern — two-level supervisor tree.
+
+Root supervisor picks which **phase** to execute; within each phase a
+phase supervisor picks which **agent** runs next.  **No fallbacks** —
+if any supervisor call fails the run is aborted with
+:class:`OrchestrationError`.
+"""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from typing import Iterable
+import time
+from dataclasses import dataclass
+from typing import Sequence
 
 from ...context import AgentReport, RunContext
 from ...llm import BaseLLMClient
 from ...logger import get_logger
-from ..base import OrchestrationPattern
+from ..base import OrchestrationError, OrchestrationPattern
+from ..metrics import CoordinationCall
 from ..registry import AgentRegistry
 from ...agents.base import AgentRole
 from .._helpers import execute_agent
@@ -42,18 +50,14 @@ DEFAULT_PHASES: list[PhaseGroup] = [
 class HierarchicalOrchestrator(OrchestrationPattern):
     """Two-level supervisor tree for agent orchestration.
 
-    The *root supervisor* picks which **phase** to execute next.  Within
-    each phase a *phase supervisor* decides which **agent** runs next.
-    Both supervisors are LLM prompts — not agents — keeping the routing
-    logic separate from the domain agents.
-
     Default hierarchy::
 
         Root Supervisor (LLM)
         ├─ planning   → [architect]
         └─ build      → [backend, frontend, infra]
 
-    Custom topologies can be provided via the ``phases`` constructor arg.
+    **Research mode**: all fallbacks removed — failures raise
+    :class:`OrchestrationError`.
     """
 
     MAX_ROOT_ITERATIONS = 10
@@ -79,71 +83,101 @@ class HierarchicalOrchestrator(OrchestrationPattern):
     # Public entry point
     # ------------------------------------------------------------------
 
-    def run(self, context: RunContext) -> Iterable[AgentReport]:
+    def run(self, context: RunContext) -> Sequence[AgentReport]:
+        m = context.metrics
+        m.pattern = "hierarchical"
+        m.task_id = getattr(context.settings, "task_id", "")
+        m.start_timer()
+
         reports: list[AgentReport] = []
         completed_phases: set[str] = set()
         completed_agents: set[str] = set()
         phase_names = [p.name for p in self.phases]
 
         self.logger.info(
-            "Hierarchical orchestrator starting (phases: %s)",
+            "╔══ HIERARCHICAL ORCHESTRATOR START ══╗  phases=%s",
             ", ".join(phase_names),
         )
 
-        for root_iter in range(1, self.max_root_iterations + 1):
-            decision = self._ask_root_supervisor(context, completed_phases, completed_agents)
-            phase_name = decision.get("phase", "done")
-            reason = decision.get("reason", "")
-
-            self.logger.info(
-                "Root iteration %d — phase=%s reason=%s",
-                root_iter,
-                phase_name,
-                reason[:120],
-            )
-
-            if phase_name == "done":
+        try:
+            for root_iter in range(1, self.max_root_iterations + 1):
                 self.logger.info(
-                    "Root supervisor signalled done after %d iterations: %s",
+                    "── root iteration %d/%d ────────────────────────────────────",
                     root_iter,
-                    reason,
+                    self.max_root_iterations,
                 )
-                break
 
-            # Find the phase group
-            phase = self._find_phase(phase_name)
-            if phase is None:
-                self.logger.warning(
-                    "Root supervisor returned unknown phase '%s'; running remaining",
+                decision, coord_call = self._ask_root_supervisor(
+                    context, completed_phases, completed_agents, root_iter
+                )
+                m.record_coordination_call(coord_call)
+
+                phase_name = decision.get("phase", "done")
+                reason = decision.get("reason", "")
+
+                self.logger.info(
+                    "  root decision: phase=%s  reason=%s  tokens=%d  latency=%.2fs",
                     phase_name,
+                    reason[:120],
+                    coord_call.total_tokens,
+                    coord_call.latency_seconds,
                 )
-                reports.extend(self._run_remaining(context, completed_agents))
-                break
 
-            # Run the phase supervisor loop
-            phase_reports = self._run_phase(context, phase, completed_agents)
-            reports.extend(phase_reports)
-            completed_phases.add(phase_name)
+                if phase_name == "done":
+                    self.logger.info(
+                        "  root supervisor signalled DONE at iteration %d: %s",
+                        root_iter,
+                        reason,
+                    )
+                    break
 
-            # If all agents across all phases have run, stop
-            all_roles = {r.value for p in self.phases for r in p.roles}
-            if completed_agents >= all_roles:
-                self.logger.info("All agents completed after phase '%s'", phase_name)
-                break
-        else:
-            self.logger.warning(
-                "Root supervisor hit max iterations (%d); running remaining",
-                self.max_root_iterations,
-            )
-            reports.extend(self._run_remaining(context, completed_agents))
+                # Find the phase group — NO FALLBACK
+                phase = self._find_phase(phase_name)
+                if phase is None:
+                    raise OrchestrationError(
+                        "hierarchical",
+                        f"Root supervisor returned unknown phase '{phase_name}' "
+                        f"(valid: {phase_names})",
+                        context={"root_iter": root_iter, "raw_decision": decision},
+                    )
 
-        self.logger.info(
-            "Hierarchical orchestrator complete: %d stages executed", len(reports)
-        )
+                # Run the phase supervisor loop
+                phase_reports = self._run_phase(context, phase, completed_agents)
+                reports.extend(phase_reports)
+                completed_phases.add(phase_name)
+
+                # All agents across all phases done?
+                all_roles = {r.value for p in self.phases for r in p.roles}
+                if completed_agents >= all_roles:
+                    self.logger.info(
+                        "  all agents completed after phase '%s'", phase_name
+                    )
+                    break
+            else:
+                raise OrchestrationError(
+                    "hierarchical",
+                    f"Root supervisor hit max iterations ({self.max_root_iterations}) "
+                    f"without signalling done.  Completed phases: {sorted(completed_phases)}",
+                    context={"max_root_iterations": self.max_root_iterations},
+                )
+
+            m.success = True
+
+        except OrchestrationError:
+            m.success = False
+            raise
+        except Exception as exc:
+            m.success = False
+            m.error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            m.stop_timer()
+            self._log_summary(m, reports)
+
         return reports
 
     # ------------------------------------------------------------------
-    # Phase supervisor
+    # Phase supervisor — NO FALLBACK
     # ------------------------------------------------------------------
 
     def _run_phase(
@@ -153,90 +187,100 @@ class HierarchicalOrchestrator(OrchestrationPattern):
         completed_agents: set[str],
     ) -> list[AgentReport]:
         """Run the phase-level supervisor loop for a single phase."""
+        m = context.metrics
         reports: list[AgentReport] = []
         phase_roles = [r.value for r in phase.roles]
 
         self.logger.info(
-            "Phase '%s' supervisor starting (agents: %s)",
+            "  ┌── phase '%s' supervisor start  agents=%s",
             phase.name,
             ", ".join(phase_roles),
         )
 
         for phase_iter in range(1, self.max_phase_iterations + 1):
-            decision = self._ask_phase_supervisor(
-                context, phase, completed_agents
+            decision, coord_call = self._ask_phase_supervisor(
+                context, phase, completed_agents, phase_iter
             )
+            m.record_coordination_call(coord_call)
+
             agent_name = decision.get("agent", "done")
             reason = decision.get("reason", "")
 
             self.logger.info(
-                "Phase '%s' iteration %d — agent=%s reason=%s",
+                "  │ phase '%s' iter %d: agent=%s  reason=%s  "
+                "tokens=%d  latency=%.2fs",
                 phase.name,
                 phase_iter,
                 agent_name,
                 reason[:120],
+                coord_call.total_tokens,
+                coord_call.latency_seconds,
             )
 
             if agent_name == "done":
                 self.logger.info(
-                    "Phase '%s' supervisor signalled done: %s",
+                    "  │ phase '%s' supervisor signalled DONE: %s",
                     phase.name,
                     reason,
                 )
                 break
 
-            # Validate the agent belongs to this phase
+            # Validate agent — NO FALLBACK
             try:
                 role = AgentRole(agent_name)
             except ValueError:
-                self.logger.warning(
-                    "Phase '%s' returned unknown agent '%s'; running remaining in phase",
-                    phase.name,
-                    agent_name,
+                raise OrchestrationError(
+                    "hierarchical",
+                    f"Phase '{phase.name}' supervisor returned unknown agent "
+                    f"'{agent_name}' (valid in phase: {phase_roles})",
+                    context={"phase": phase.name, "phase_iter": phase_iter},
                 )
-                reports.extend(
-                    self._run_remaining_in_phase(context, phase, completed_agents)
-                )
-                break
 
             if role not in phase.roles:
-                self.logger.warning(
-                    "Agent '%s' does not belong to phase '%s'; skipping",
-                    agent_name,
-                    phase.name,
+                raise OrchestrationError(
+                    "hierarchical",
+                    f"Agent '{agent_name}' does not belong to phase '{phase.name}' "
+                    f"(phase agents: {phase_roles})",
+                    context={"phase": phase.name, "phase_iter": phase_iter},
                 )
-                continue
 
             if role.value in completed_agents:
-                self.logger.info(
-                    "Agent '%s' already completed; skipping", agent_name
+                raise OrchestrationError(
+                    "hierarchical",
+                    f"Phase '{phase.name}' supervisor selected already-completed "
+                    f"agent '{agent_name}'",
+                    context={"phase": phase.name, "phase_iter": phase_iter,
+                             "completed": sorted(completed_agents)},
                 )
-                continue
 
             # Dispatch
             agent = self.registry.build(role)
-            report = execute_agent(agent, role, context)
+            report, execution = execute_agent(agent, role, context)
+            m.record_agent_execution(execution)
             reports.append(report)
             completed_agents.add(role.value)
 
-            # Check if all agents in this phase are done
+            # All agents in this phase done?
             if all(r.value in completed_agents for r in phase.roles):
-                self.logger.info("All agents in phase '%s' completed", phase.name)
+                self.logger.info(
+                    "  │ all agents in phase '%s' completed", phase.name
+                )
                 break
         else:
-            self.logger.warning(
-                "Phase '%s' hit max iterations (%d); running remaining in phase",
-                phase.name,
-                self.max_phase_iterations,
-            )
-            reports.extend(
-                self._run_remaining_in_phase(context, phase, completed_agents)
+            raise OrchestrationError(
+                "hierarchical",
+                f"Phase '{phase.name}' supervisor hit max iterations "
+                f"({self.max_phase_iterations}).  Completed: "
+                f"{[r for r in phase_roles if r in completed_agents]}",
+                context={"phase": phase.name,
+                         "max_phase_iterations": self.max_phase_iterations},
             )
 
+        self.logger.info("  └── phase '%s' supervisor end", phase.name)
         return reports
 
     # ------------------------------------------------------------------
-    # Root supervisor LLM interaction
+    # Root supervisor LLM interaction — NO FALLBACK
     # ------------------------------------------------------------------
 
     def _ask_root_supervisor(
@@ -244,8 +288,8 @@ class HierarchicalOrchestrator(OrchestrationPattern):
         context: RunContext,
         completed_phases: set[str],
         completed_agents: set[str],
-    ) -> dict[str, str]:
-        """Ask the LLM which phase to execute next."""
+        root_iter: int,
+    ) -> tuple[dict[str, str], CoordinationCall]:
         prompt = self._build_root_prompt(context, completed_phases, completed_agents)
         system = (
             "You are the root supervisor for a hierarchical multi-agent "
@@ -253,14 +297,49 @@ class HierarchicalOrchestrator(OrchestrationPattern):
             "execute next. Respond with JSON only — no markdown fences, "
             "no commentary."
         )
+
+        self.logger.debug(
+            "  root prompt (%d chars):\n%s", len(prompt), prompt[:500]
+        )
+
+        pre = self.llm.usage_stats.copy()
+        t0 = time.perf_counter()
+
         try:
             raw = self.llm.generate(prompt, system=system, temperature=0.0)
-            return self._parse_json_decision(raw, required_key="phase")
         except Exception as exc:
-            self.logger.warning(
-                "Root supervisor LLM call failed (%s); using fallback", exc
-            )
-            return self._fallback_root(completed_phases)
+            raise OrchestrationError(
+                "hierarchical",
+                f"Root supervisor LLM call failed at iteration {root_iter}: {exc}",
+                context={"root_iter": root_iter},
+            ) from exc
+
+        latency = time.perf_counter() - t0
+        post = self.llm.usage_stats
+
+        self.logger.debug("  root raw response:\n%s", raw[:500])
+
+        try:
+            decision = self._parse_json_decision(raw, required_key="phase")
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise OrchestrationError(
+                "hierarchical",
+                f"Root supervisor returned unparseable response at iteration "
+                f"{root_iter}: {exc}",
+                context={"root_iter": root_iter, "raw_response": raw[:500]},
+            ) from exc
+
+        coord_call = CoordinationCall(
+            purpose=f"root_supervisor_iter_{root_iter}",
+            prompt_tokens=post["prompt_tokens"] - pre["prompt_tokens"],
+            completion_tokens=post["completion_tokens"] - pre["completion_tokens"],
+            total_tokens=post["total_tokens"] - pre["total_tokens"],
+            latency_seconds=round(latency, 4),
+            raw_response=raw,
+            parsed_result=decision,
+            iteration=root_iter,
+        )
+        return decision, coord_call
 
     def _build_root_prompt(
         self,
@@ -299,7 +378,7 @@ class HierarchicalOrchestrator(OrchestrationPattern):
         )
 
     # ------------------------------------------------------------------
-    # Phase supervisor LLM interaction
+    # Phase supervisor LLM interaction — NO FALLBACK
     # ------------------------------------------------------------------
 
     def _ask_phase_supervisor(
@@ -307,24 +386,62 @@ class HierarchicalOrchestrator(OrchestrationPattern):
         context: RunContext,
         phase: PhaseGroup,
         completed_agents: set[str],
-    ) -> dict[str, str]:
-        """Ask the LLM which agent within a phase to run next."""
+        phase_iter: int,
+    ) -> tuple[dict[str, str], CoordinationCall]:
         prompt = self._build_phase_prompt(context, phase, completed_agents)
         system = (
             f"You are the '{phase.name}' phase supervisor in a hierarchical "
             "multi-agent system. You decide which agent in your phase runs "
             "next. Respond with JSON only — no markdown fences, no commentary."
         )
+
+        self.logger.debug(
+            "  phase '%s' prompt (%d chars):\n%s",
+            phase.name, len(prompt), prompt[:500],
+        )
+
+        pre = self.llm.usage_stats.copy()
+        t0 = time.perf_counter()
+
         try:
             raw = self.llm.generate(prompt, system=system, temperature=0.0)
-            return self._parse_json_decision(raw, required_key="agent")
         except Exception as exc:
-            self.logger.warning(
-                "Phase '%s' supervisor LLM failed (%s); using fallback",
-                phase.name,
-                exc,
-            )
-            return self._fallback_phase(phase, completed_agents)
+            raise OrchestrationError(
+                "hierarchical",
+                f"Phase '{phase.name}' supervisor LLM call failed at "
+                f"iteration {phase_iter}: {exc}",
+                context={"phase": phase.name, "phase_iter": phase_iter},
+            ) from exc
+
+        latency = time.perf_counter() - t0
+        post = self.llm.usage_stats
+
+        self.logger.debug(
+            "  phase '%s' raw response:\n%s", phase.name, raw[:500]
+        )
+
+        try:
+            decision = self._parse_json_decision(raw, required_key="agent")
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise OrchestrationError(
+                "hierarchical",
+                f"Phase '{phase.name}' supervisor returned unparseable response "
+                f"at iteration {phase_iter}: {exc}",
+                context={"phase": phase.name, "phase_iter": phase_iter,
+                         "raw_response": raw[:500]},
+            ) from exc
+
+        coord_call = CoordinationCall(
+            purpose=f"phase_{phase.name}_supervisor_iter_{phase_iter}",
+            prompt_tokens=post["prompt_tokens"] - pre["prompt_tokens"],
+            completion_tokens=post["completion_tokens"] - pre["completion_tokens"],
+            total_tokens=post["total_tokens"] - pre["total_tokens"],
+            latency_seconds=round(latency, 4),
+            raw_response=raw,
+            parsed_result=decision,
+            iteration=phase_iter,
+        )
+        return decision, coord_call
 
     def _build_phase_prompt(
         self,
@@ -364,7 +481,6 @@ class HierarchicalOrchestrator(OrchestrationPattern):
     # ------------------------------------------------------------------
 
     def _parse_json_decision(self, raw: str, *, required_key: str) -> dict[str, str]:
-        """Parse a supervisor JSON response."""
         text = raw.strip()
         if text.startswith("```"):
             parts = text.split("```", 2)
@@ -375,28 +491,10 @@ class HierarchicalOrchestrator(OrchestrationPattern):
         text = text.strip()
         data = json.loads(text)
         if not isinstance(data, dict) or required_key not in data:
-            raise ValueError(f"Invalid supervisor response (missing '{required_key}'): {data}")
+            raise ValueError(
+                f"Invalid supervisor response (missing '{required_key}'): {data}"
+            )
         return data
-
-    # ------------------------------------------------------------------
-    # Fallbacks
-    # ------------------------------------------------------------------
-
-    def _fallback_root(self, completed_phases: set[str]) -> dict[str, str]:
-        """Pick the next phase in declaration order."""
-        for phase in self.phases:
-            if phase.name not in completed_phases:
-                return {"phase": phase.name, "reason": "fallback order"}
-        return {"phase": "done", "reason": "all phases completed (fallback)"}
-
-    def _fallback_phase(
-        self, phase: PhaseGroup, completed_agents: set[str]
-    ) -> dict[str, str]:
-        """Pick the next agent within a phase in declaration order."""
-        for role in phase.roles:
-            if role.value not in completed_agents:
-                return {"agent": role.value, "reason": "fallback order"}
-        return {"agent": "done", "reason": "all phase agents completed (fallback)"}
 
     def _find_phase(self, name: str) -> PhaseGroup | None:
         for phase in self.phases:
@@ -404,30 +502,29 @@ class HierarchicalOrchestrator(OrchestrationPattern):
                 return phase
         return None
 
-    def _run_remaining_in_phase(
-        self,
-        context: RunContext,
-        phase: PhaseGroup,
-        completed_agents: set[str],
-    ) -> list[AgentReport]:
-        """Run un-dispatched agents within a phase in declaration order."""
-        reports: list[AgentReport] = []
-        for role in phase.roles:
-            if role.value in completed_agents:
-                continue
-            agent = self.registry.build(role)
-            report = execute_agent(agent, role, context)
-            reports.append(report)
-            completed_agents.add(role.value)
-        return reports
+    # ------------------------------------------------------------------
+    # Logging
+    # ------------------------------------------------------------------
 
-    def _run_remaining(
-        self, context: RunContext, completed_agents: set[str]
-    ) -> list[AgentReport]:
-        """Run all un-dispatched agents across all phases in declaration order."""
-        reports: list[AgentReport] = []
-        for phase in self.phases:
-            reports.extend(
-                self._run_remaining_in_phase(context, phase, completed_agents)
-            )
-        return reports
+    def _log_summary(self, m: object, reports: list[AgentReport]) -> None:
+        self.logger.info(
+            "╚══ HIERARCHICAL ORCHESTRATOR END ════╝\n"
+            "  success=%s  duration=%.2fs  agents_run=%d\n"
+            "  coordination_calls=%d  coordination_tokens=%d  (prompt=%d, completion=%d)\n"
+            "  functional_tokens=%d  (prompt=%d, completion=%d)\n"
+            "  coordination/functional ratio=%.4f\n"
+            "  total_tokens=%d  est_cost=$%.6f",
+            m.success,
+            m.total_duration_seconds,
+            m.agent_execution_count,
+            m.coordination_call_count,
+            m.coordination_total_tokens,
+            m.coordination_prompt_tokens,
+            m.coordination_completion_tokens,
+            m.functional_total_tokens,
+            m.functional_prompt_tokens,
+            m.functional_completion_tokens,
+            m.coordination_to_functional_ratio,
+            m.total_tokens,
+            m.cost_estimate(),
+        )

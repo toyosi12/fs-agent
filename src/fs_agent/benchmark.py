@@ -2,10 +2,14 @@
 
 Reads tasks from ``dataset/tasks.json``, runs each task through every
 orchestration pattern, and records rich metrics (token usage, wall-clock
-time, communication overhead, agent-level timings, etc.).
+time, coordination overhead, agent-level timings, etc.).
 
 Results are written as both JSON and CSV to the ``results/`` directory
-inside the configured artifact root.
+inside the configured artifact root.  Output is designed to answer:
+
+* **RQ1** — Task completion & quality (success rate, wall-clock time)
+* **RQ2** — Performance vs resource trade-off (total tokens, cost estimate)
+* **RQ3** — Coordination overhead (coordination vs functional tokens, ratio)
 """
 
 from __future__ import annotations
@@ -29,6 +33,8 @@ from .orchestration import (
     DecentralizedOrchestrator,
     HierarchicalOrchestrator,
     IterativeRefinementOrchestrator,
+    OrchestrationError,
+    OrchestrationMetrics,
     ParallelOrchestrator,
     SequentialOrchestrator,
     register_default_agents,
@@ -59,11 +65,23 @@ class AgentMetrics:
     duration_seconds: float
     artifact_count: int
     attachment_count: int
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    attempt: int = 1
 
 
 @dataclass
 class RunMetrics:
-    """Aggregated metrics for a single (task × pattern) run."""
+    """Aggregated metrics for a single (task × pattern) run.
+
+    Fields are laid out to answer the three research questions:
+
+    * **RQ1** — ``success``, ``wall_clock_seconds``, ``agent_count``
+    * **RQ2** — ``total_tokens``, ``cost_estimate``
+    * **RQ3** — ``functional_*_tokens``, ``coordination_*_tokens``,
+      ``coordination_to_functional_ratio``, ``coordination_call_count``
+    """
 
     task_id: str
     task_instruction: str
@@ -71,28 +89,40 @@ class RunMetrics:
     success: bool
     error: str | None = None
 
-    # Timing
+    # RQ1 — Timing
     wall_clock_seconds: float = 0.0
     agent_total_seconds: float = 0.0
     orchestration_overhead_seconds: float = 0.0
 
-    # Token usage (from LLM client)
+    # RQ2 — Token usage & cost
     llm_call_count: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cost_estimate: float = 0.0
+
+    # RQ3 — Coordination vs Functional breakdown
+    functional_prompt_tokens: int = 0
+    functional_completion_tokens: int = 0
+    functional_total_tokens: int = 0
+    coordination_prompt_tokens: int = 0
+    coordination_completion_tokens: int = 0
+    coordination_total_tokens: int = 0
+    coordination_call_count: int = 0
+    coordination_to_functional_ratio: float = 0.0
+    coordination_overhead_seconds: float = 0.0
 
     # Agent-level breakdown
     agent_count: int = 0
     agents: list[AgentMetrics] = field(default_factory=list)
 
-    # Communication overhead (inter-agent messages / coordinator calls)
-    coordinator_calls: int = 0
-
     # Output metadata
     artifact_dir: str = ""
     started_at: str = ""
     finished_at: str = ""
+
+    # Full orchestration metrics dict (for JSON report)
+    orchestration_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -118,15 +148,6 @@ def _build_pattern(
     raise ValueError(f"Unknown pattern: {name}")
 
 
-def _count_coordinator_calls(reports: Sequence[AgentReport]) -> int:
-    """Heuristic: count metadata entries that hint at coordinator / handoff calls."""
-    count = 0
-    for r in reports:
-        count += r.metadata.get("coordinator_calls", 0)
-        count += r.metadata.get("handoff_calls", 0)
-    return count
-
-
 def run_single(
     task_id: str,
     instruction: str,
@@ -136,7 +157,13 @@ def run_single(
     llm: BaseLLMClient,
     llm_per_role: dict[str, BaseLLMClient] | None = None,
 ) -> RunMetrics:
-    """Execute one (task × pattern) combination and return metrics."""
+    """Execute one (task × pattern) combination and return metrics.
+
+    Orchestration metrics are captured automatically via ``context.metrics``
+    (an :class:`OrchestrationMetrics` instance that each pattern populates).
+    If the pattern raises :class:`OrchestrationError` the run is marked as
+    failed and the error is recorded — no silent fallback.
+    """
 
     run_artifact_dir = artifact_dir / task_id / pattern
     run_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -153,6 +180,9 @@ def run_single(
 
     # Reset token counters for this run
     llm.reset_usage()
+    if llm_per_role:
+        for role_llm in llm_per_role.values():
+            role_llm.reset_usage()
 
     started_at = datetime.now(timezone.utc)
     start_wall = time.perf_counter()
@@ -179,9 +209,6 @@ def run_single(
             }
         )
 
-        # Build per-role LLM overrides so agents pick up their
-        # individually-configured providers from the environment.
-
         context = RunContext(
             spec=None,
             user_request=instruction,
@@ -198,51 +225,91 @@ def run_single(
 
         reports: list[AgentReport] = list(orchestrator.run(context))
 
-        # --- Collect agent-level metrics ---
+        # --- Populate from OrchestrationMetrics ---
+        om = context.metrics
+        wall_clock = time.perf_counter() - start_wall
+
+        metrics.success = om.success
+        metrics.wall_clock_seconds = round(wall_clock, 3)
+        metrics.agent_total_seconds = round(
+            sum(e.duration_seconds for e in om.agent_executions), 3
+        )
+        metrics.orchestration_overhead_seconds = round(
+            max(wall_clock - metrics.agent_total_seconds, 0), 3
+        )
+
+        # RQ2 — Total token usage
+        usage = llm.usage_stats
+        metrics.llm_call_count = usage["call_count"]
+        metrics.prompt_tokens = om.functional_prompt_tokens + om.coordination_prompt_tokens
+        metrics.completion_tokens = om.functional_completion_tokens + om.coordination_completion_tokens
+        metrics.total_tokens = om.total_tokens
+        metrics.cost_estimate = round(om.cost_estimate(), 6)
+
+        # RQ3 — Coordination vs Functional breakdown
+        metrics.functional_prompt_tokens = om.functional_prompt_tokens
+        metrics.functional_completion_tokens = om.functional_completion_tokens
+        metrics.functional_total_tokens = om.functional_total_tokens
+        metrics.coordination_prompt_tokens = om.coordination_prompt_tokens
+        metrics.coordination_completion_tokens = om.coordination_completion_tokens
+        metrics.coordination_total_tokens = om.coordination_total_tokens
+        metrics.coordination_call_count = om.coordination_call_count
+        metrics.coordination_to_functional_ratio = round(
+            om.coordination_to_functional_ratio, 6
+        )
+        metrics.coordination_overhead_seconds = round(
+            om.coordination_overhead_seconds, 3
+        )
+
+        # Agent-level breakdown
         agent_metrics: list[AgentMetrics] = []
-        agent_total = 0.0
-        for r in reports:
-            dur = (r.finished_at - r.started_at).total_seconds()
-            agent_total += dur
+        for ex in om.agent_executions:
             agent_metrics.append(
                 AgentMetrics(
-                    role=r.role,
-                    status=r.status,
-                    duration_seconds=round(dur, 3),
-                    artifact_count=len(r.artifacts),
-                    attachment_count=len(r.metadata.get("attachments", [])),
+                    role=ex.role,
+                    status=ex.status,
+                    duration_seconds=round(ex.duration_seconds, 3),
+                    artifact_count=ex.artifact_count,
+                    attachment_count=ex.attachment_count,
+                    prompt_tokens=ex.prompt_tokens,
+                    completion_tokens=ex.completion_tokens,
+                    total_tokens=ex.total_tokens,
+                    attempt=ex.attempt,
                 )
             )
-
-        wall_clock = time.perf_counter() - start_wall
-        usage = llm.usage_stats
-
-        metrics.success = True
-        metrics.wall_clock_seconds = round(wall_clock, 3)
-        metrics.agent_total_seconds = round(agent_total, 3)
-        metrics.orchestration_overhead_seconds = round(
-            max(wall_clock - agent_total, 0), 3
-        )
-        metrics.llm_call_count = usage["call_count"]
-        metrics.prompt_tokens = usage["prompt_tokens"]
-        metrics.completion_tokens = usage["completion_tokens"]
-        metrics.total_tokens = usage["total_tokens"]
         metrics.agent_count = len(reports)
         metrics.agents = agent_metrics
-        metrics.coordinator_calls = _count_coordinator_calls(reports)
+
+        # Store full orchestration metrics dict for the JSON report
+        metrics.orchestration_metrics = om.to_dict()
+
+    except OrchestrationError as exc:
+        metrics.wall_clock_seconds = round(time.perf_counter() - start_wall, 3)
+        metrics.error = f"OrchestrationError[{exc.pattern}]: {exc.reason}"
+        metrics.success = False
+        logger.error(
+            "✗ BENCHMARK ORCHESTRATION ERROR  task=%s  pattern=%s  reason=%s",
+            task_id, pattern, exc.reason,
+        )
 
     except Exception as exc:
         metrics.wall_clock_seconds = round(time.perf_counter() - start_wall, 3)
         metrics.error = f"{type(exc).__name__}: {exc}"
+        metrics.success = False
         logger.exception("✗ BENCHMARK FAILED  task=%s  pattern=%s", task_id, pattern)
 
     finished_at = datetime.now(timezone.utc)
     metrics.finished_at = finished_at.isoformat()
 
     logger.info(
-        "■ BENCHMARK  task=%s  pattern=%-14s  %.2fs  tokens=%d  agents=%d  %s",
+        "■ BENCHMARK  task=%s  pattern=%-14s  %.2fs  "
+        "tokens=%d (func=%d coord=%d ratio=%.4f)  "
+        "agents=%d  cost=$%.6f  %s",
         task_id, pattern, metrics.wall_clock_seconds,
-        metrics.total_tokens, metrics.agent_count,
+        metrics.total_tokens, metrics.functional_total_tokens,
+        metrics.coordination_total_tokens,
+        metrics.coordination_to_functional_ratio,
+        metrics.agent_count, metrics.cost_estimate,
         "OK" if metrics.success else "FAIL",
     )
 
@@ -364,28 +431,47 @@ def run_benchmark(
 # ---------------------------------------------------------------------------
 
 def _write_json_report(metrics: list[RunMetrics], path: Path) -> None:
-    """Write full metrics to a JSON file."""
-    data = [asdict(m) for m in metrics]
+    """Write full metrics to a JSON file, including orchestration metrics."""
+    data = []
+    for m in metrics:
+        d = asdict(m)
+        # Include the full orchestration metrics dict at the top level
+        d["orchestration_metrics"] = m.orchestration_metrics
+        data.append(d)
     path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote JSON report → %s", path)
 
 
 def _write_csv_report(metrics: list[RunMetrics], path: Path) -> None:
-    """Write a flat CSV of top-level metrics (no nested agent breakdown)."""
+    """Write a flat CSV with RQ-specific columns (no nested agent breakdown)."""
     fieldnames = [
+        # Identification
         "task_id",
         "pattern",
         "success",
         "error",
+        # RQ1 — Task completion & quality
         "wall_clock_seconds",
         "agent_total_seconds",
         "orchestration_overhead_seconds",
+        "agent_count",
+        # RQ2 — Performance vs resource trade-off
         "llm_call_count",
         "prompt_tokens",
         "completion_tokens",
         "total_tokens",
-        "agent_count",
-        "coordinator_calls",
+        "cost_estimate",
+        # RQ3 — Coordination overhead
+        "functional_prompt_tokens",
+        "functional_completion_tokens",
+        "functional_total_tokens",
+        "coordination_prompt_tokens",
+        "coordination_completion_tokens",
+        "coordination_total_tokens",
+        "coordination_call_count",
+        "coordination_to_functional_ratio",
+        "coordination_overhead_seconds",
+        # Timestamps
         "started_at",
         "finished_at",
     ]
@@ -397,12 +483,13 @@ def _write_csv_report(metrics: list[RunMetrics], path: Path) -> None:
             row.pop("agents", None)
             row.pop("task_instruction", None)
             row.pop("artifact_dir", None)
+            row.pop("orchestration_metrics", None)
             writer.writerow(row)
     logger.info("Wrote CSV report → %s", path)
 
 
 def _write_summary(metrics: list[RunMetrics], path: Path) -> None:
-    """Write a per-pattern aggregate summary."""
+    """Write a per-pattern aggregate summary with RQ-specific aggregates."""
     from collections import defaultdict
 
     buckets: dict[str, list[RunMetrics]] = defaultdict(list)
@@ -413,18 +500,37 @@ def _write_summary(metrics: list[RunMetrics], path: Path) -> None:
     for pattern, runs in buckets.items():
         successful = [r for r in runs if r.success]
         failed = [r for r in runs if not r.success]
+
+        # RQ1 — Task completion
         wall_times = [r.wall_clock_seconds for r in successful]
+
+        # RQ2 — Resource usage
         token_totals = [r.total_tokens for r in successful]
-        overhead = [r.orchestration_overhead_seconds for r in successful]
-        llm_calls = [r.llm_call_count for r in successful]
+        costs = [r.cost_estimate for r in successful]
+
+        # RQ3 — Coordination overhead
+        func_tokens = [r.functional_total_tokens for r in successful]
+        coord_tokens = [r.coordination_total_tokens for r in successful]
+        coord_ratios = [r.coordination_to_functional_ratio for r in successful]
+        coord_calls = [r.coordination_call_count for r in successful]
+        coord_overhead = [r.coordination_overhead_seconds for r in successful]
 
         summary[pattern] = {
+            # Identification
             "total_runs": len(runs),
             "successful": len(successful),
             "failed": len(failed),
+            "success_rate": round(len(successful) / len(runs), 4) if runs else 0.0,
+
+            # RQ1 — Task completion & quality
             "avg_wall_clock_seconds": round(_safe_avg(wall_times), 3),
             "min_wall_clock_seconds": round(min(wall_times), 3) if wall_times else None,
             "max_wall_clock_seconds": round(max(wall_times), 3) if wall_times else None,
+            "avg_agent_count": round(
+                _safe_avg([r.agent_count for r in successful]), 1
+            ),
+
+            # RQ2 — Performance vs resource trade-off
             "avg_total_tokens": round(_safe_avg(token_totals), 1),
             "avg_prompt_tokens": round(
                 _safe_avg([r.prompt_tokens for r in successful]), 1
@@ -432,14 +538,22 @@ def _write_summary(metrics: list[RunMetrics], path: Path) -> None:
             "avg_completion_tokens": round(
                 _safe_avg([r.completion_tokens for r in successful]), 1
             ),
-            "avg_llm_calls": round(_safe_avg(llm_calls), 1),
-            "avg_orchestration_overhead_seconds": round(_safe_avg(overhead), 3),
-            "avg_agent_count": round(
-                _safe_avg([r.agent_count for r in successful]), 1
+            "avg_cost_estimate": round(_safe_avg(costs), 6),
+            "total_cost_estimate": round(sum(costs), 6),
+
+            # RQ3 — Coordination overhead
+            "avg_functional_tokens": round(_safe_avg(func_tokens), 1),
+            "avg_coordination_tokens": round(_safe_avg(coord_tokens), 1),
+            "avg_coordination_to_functional_ratio": round(
+                _safe_avg(coord_ratios), 6
             ),
-            "avg_coordinator_calls": round(
-                _safe_avg([r.coordinator_calls for r in successful]), 1
+            "avg_coordination_call_count": round(_safe_avg(coord_calls), 1),
+            "avg_coordination_overhead_seconds": round(
+                _safe_avg(coord_overhead), 3
             ),
+
+            # Errors
+            "errors": [r.error for r in failed if r.error],
         }
 
     path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
