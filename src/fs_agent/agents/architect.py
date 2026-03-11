@@ -119,7 +119,7 @@ class ArchitectAgent(BaseAgent):
             "up SQL using SQLite syntax, down SQL).\n"
             "- frontend.routes must reference backend endpoints via consumes.\n"
             "- frontend.components lists reusable UI components with props and consumes.\n"
-            "- frontend.theme can capture color/styling tokens from the brief.\n"
+            "- frontend.theme must be a flat object where every key AND value is a plain "
             "- infra.targets must be objects with name, environment (dev|staging|test|prod), "
             "description, and runtime (docker|serverless|kubernetes).\n"
             "- Include at least two infra targets (dev and prod), both using 'docker' runtime.\n"
