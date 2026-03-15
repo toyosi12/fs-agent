@@ -61,6 +61,21 @@ class BaseLLMClient(ABC):
     def generate(self, prompt: str, *, system: str | None = None, temperature: float = 0.2) -> str:
         """Return generated text for the provided prompt."""
 
+    def generate_with_images(
+        self,
+        prompt: str,
+        images_b64: list[str],
+        *,
+        system: str | None = None,
+        temperature: float = 0.2,
+    ) -> str:
+        """Generate text with one or more base64-encoded images.
+
+        Subclasses that support vision should override this.
+        The default falls back to text-only ``generate()``.
+        """
+        return self.generate(prompt, system=system, temperature=temperature)
+
 
 class DummyLLMClient(BaseLLMClient):
     """Fallback that returns deterministic placeholder output."""
@@ -148,6 +163,57 @@ class OpenAILLMClient(BaseLLMClient):
             # Model returned only thinking with no actual response
             logger.warning("Model returned only <think> content; raw length=%d", len(content))
             raise RuntimeError(f"Empty response after stripping <think> block (raw length={len(content)})")
+        return cleaned
+
+    def generate_with_images(
+        self,
+        prompt: str,
+        images_b64: list[str],
+        *,
+        system: str | None = None,
+        temperature: float = 0.2,
+    ) -> str:
+        """Generate text with base64-encoded PNG images (GPT-4o vision)."""
+        messages: list[dict] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+
+        # Build multi-part user content: text + images
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        for img_b64 in images_b64:
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{img_b64}",
+                    "detail": "high",
+                },
+            })
+        messages.append({"role": "user", "content": content})
+
+        try:
+            completion = self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+            )
+        except Exception as exc:  # pragma: no cover - network dependent
+            raise RuntimeError(f"OpenAI vision request failed: {exc}") from exc
+
+        if completion.usage:
+            self._record_usage(
+                prompt_tokens=completion.usage.prompt_tokens or 0,
+                completion_tokens=completion.usage.completion_tokens or 0,
+                total_tokens=completion.usage.total_tokens,
+            )
+
+        result = completion.choices[0].message.content
+        if result is None:  # pragma: no cover - defensive
+            raise RuntimeError(f"Empty vision response from model: {completion}")
+
+        cleaned = _THINK_PATTERN.sub("", result).strip()
+        if not cleaned:
+            logger.warning("Vision model returned only <think> content; raw length=%d", len(result))
+            raise RuntimeError(f"Empty vision response after stripping <think> block (raw length={len(result)})")
         return cleaned
 
 

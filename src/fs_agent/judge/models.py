@@ -138,6 +138,11 @@ class JudgeResult(BaseModel):
     judge_model: str = "gpt-4o"
     error: str | None = None
 
+    # --- Token usage ---
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
     def compute_aggregates(self) -> None:
         """Recompute aggregate counts and accuracy from individual scores."""
         # Frontend
