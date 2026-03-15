@@ -171,14 +171,18 @@ def judge(
     table.add_column("Backend", justify="right")
     table.add_column("Database", justify="right")
     table.add_column("Appearance", justify="right")
+    table.add_column("Tokens", justify="right")
     table.add_column("Error", style="red")
 
+    total_tokens_all = 0
     for r in results:
         fe_str = f"{r.frontend_weighted_accuracy:.2f}" if r.frontend_total > 0 else "-"
         be_str = f"{r.backend_accuracy:.2f}" if r.backend_total > 0 else "-"
         db_str = f"{r.database_accuracy:.2f}" if r.database_total > 0 else "-"
         ap_str = f"{r.appearance.overall:.1f}" if r.appearance else "-"
+        tok_str = f"{r.total_tokens:,}" if r.total_tokens else "-"
         err_str = r.error[:40] if r.error else ""
+        total_tokens_all += r.total_tokens
         table.add_row(
             r.task_id,
             r.pattern,
@@ -187,12 +191,14 @@ def judge(
             be_str,
             db_str,
             ap_str,
+            tok_str,
             err_str,
         )
 
     console.print(table)
+    console.print(f"\n[bold]Total tokens consumed:[/bold] {total_tokens_all:,}")
     console.print(
-        f"\n[bold green]Judge results written to:[/bold green] {artifact_root / 'results'}"
+        f"[bold green]Judge results written to:[/bold green] {artifact_root / 'results'}"
     )
 
 

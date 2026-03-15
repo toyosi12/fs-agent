@@ -252,6 +252,9 @@ def run_judge(
                 continue
 
             try:
+                # Snapshot token counters before evaluation
+                _before = judge_llm.usage_stats
+
                 if mode == "runtime":
                     result = _evaluate_runtime(
                         judge_llm, artifact_root, task_id, pattern,
@@ -272,6 +275,12 @@ def run_judge(
                         backend_test_cases=backend_tests,
                         data_structures=data_structures,
                     )
+
+                # Record delta tokens consumed by this evaluation
+                _after = judge_llm.usage_stats
+                result.prompt_tokens = _after["prompt_tokens"] - _before["prompt_tokens"]
+                result.completion_tokens = _after["completion_tokens"] - _before["completion_tokens"]
+                result.total_tokens = _after["total_tokens"] - _before["total_tokens"]
             except Exception as exc:
                 logger.exception(
                     "✗ JUDGE FAILED  task=%s  pattern=%s", task_id, pattern
@@ -287,13 +296,14 @@ def run_judge(
 
             all_results.append(result)
             logger.info(
-                "■ JUDGE  task=%s  pattern=%s  fe=%.2f  be=%.2f  db=%.2f  appearance=%.1f",
+                "■ JUDGE  task=%s  pattern=%s  fe=%.2f  be=%.2f  db=%.2f  appearance=%.1f  tokens=%d",
                 task_id,
                 pattern,
                 result.frontend_weighted_accuracy,
                 result.backend_accuracy,
                 result.database_accuracy,
                 result.appearance.overall if result.appearance else 0.0,
+                result.total_tokens,
             )
             print(
                 f"[judge] ■ Done task={task_id}  pattern={pattern}"
@@ -301,6 +311,7 @@ def run_judge(
                 f"  be={result.backend_accuracy:.2f}"
                 f"  db={result.database_accuracy:.2f}"
                 f"  appearance={result.appearance.overall if result.appearance else 0.0:.1f}"
+                f"  tokens={result.total_tokens}"
             )
 
     # Write results
@@ -439,10 +450,18 @@ def _aggregate_scores(results: list[JudgeResult]) -> dict[str, Any]:
     db_accs = [r.database_accuracy for r in valid]
     appearances = [r.appearance.overall for r in valid if r.appearance]
 
+    total_toks = [r.total_tokens for r in valid if r.total_tokens > 0]
+
     return {
         "count": n,
         "evaluated": len(valid),
         "errors": len(errored),
+        "total_tokens": sum(r.total_tokens for r in results),
+        "tokens_per_eval": {
+            "mean": round(_safe_avg(total_toks)),
+            "min": min(total_toks) if total_toks else None,
+            "max": max(total_toks) if total_toks else None,
+        },
         "frontend_weighted_accuracy": {
             "mean": round(_safe_avg(fe_accs), 4),
             "min": round(min(fe_accs), 4) if fe_accs else None,

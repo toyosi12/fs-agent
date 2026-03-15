@@ -13,9 +13,9 @@ Design decisions
   regardless of how many individual test cases exist.
 * **Programmatic database checks** — the SQLite schema is queried directly ;
   the LLM maps human-readable data-structure names to table names only once.
-* **Frontend** — if the frontend container is healthy we record a pass
-  for the "renders at all" check.  Deeper functional testing would require
-  Playwright (not yet implemented).
+* **Frontend** — if the frontend is healthy, Playwright captures a
+  screenshot which is sent to GPT-4o vision for appearance and functional
+  evaluation.  Falls back to code-only analysis if Playwright fails.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import httpx
 
 from ..llm import BaseLLMClient
 from ..logger import get_logger
+from .browser import capture_screenshots
 from .executor import ProjectInstance
 from .models import (
     AppearanceScore,
@@ -423,11 +424,10 @@ def run_frontend_tests(
 ) -> list[FrontendTestScore]:
     """Evaluate frontend test cases.
 
-    Currently a hybrid approach:
-    - If the frontend is healthy (returns HTTP 200), it gets credit for
-      rendering. Individual test cases are still evaluated via static
-      code analysis (until Playwright support is added).
-    - If the frontend is NOT healthy, all tests score NO.
+    If the frontend is healthy, takes a Playwright screenshot and asks
+    GPT-4o vision to evaluate the UI test cases against both the code
+    and the actual rendered page.  Falls back to code-only analysis if
+    Playwright is unavailable or screenshotting fails.
     """
     if not ui_test_cases:
         return []
@@ -444,6 +444,16 @@ def run_frontend_tests(
             for tc in ui_test_cases
         ]
 
+    # Capture a screenshot of the running frontend
+    screenshot_b64: str | None = None
+    browser_result = capture_screenshots(frontend_url)
+    if browser_result.screenshots:
+        screenshot_b64 = browser_result.screenshots[0].base64
+        print(f"[runtime]   Captured frontend screenshot ({len(browser_result.screenshots[0].png_bytes)} bytes)")
+    else:
+        reason = browser_result.error or "unknown"
+        print(f"[runtime]   Screenshot failed ({reason}) — falling back to code-only analysis")
+
     # Fetch the actual HTML to confirm rendering
     html_snippet = ""
     try:
@@ -458,12 +468,22 @@ def run_frontend_tests(
         for i, tc in enumerate(ui_test_cases)
     )
 
-    system = (
-        "You are a frontend QA evaluator. The frontend application is running "
-        "and serving HTTP 200. You are given the task description, the frontend "
-        "source code, and the served HTML page. Evaluate each UI test case.\n\n"
-        'Output ONLY a JSON array: [{"test_index":0,"verdict":"YES"|"PARTIAL"|"NO","reasoning":"..."},...]'
-    )
+    if screenshot_b64:
+        system = (
+            "You are a frontend QA evaluator. The frontend application is running "
+            "and you are given a screenshot of the rendered page, the source code, "
+            "and the served HTML. Evaluate each UI test case by examining both the "
+            "visual screenshot and the code.\n\n"
+            'Output ONLY a JSON array: [{"test_index":0,"verdict":"YES"|"PARTIAL"|"NO","reasoning":"..."},...]'
+        )
+    else:
+        system = (
+            "You are a frontend QA evaluator. The frontend application is running "
+            "and serving HTTP 200. You are given the task description, the frontend "
+            "source code, and the served HTML page. Evaluate each UI test case.\n\n"
+            'Output ONLY a JSON array: [{"test_index":0,"verdict":"YES"|"PARTIAL"|"NO","reasoning":"..."},...]'
+        )
+
     user = (
         f"## Task Description\n{task_instruction}\n\n"
         f"## Frontend Source Code\n```\n{_truncate(frontend_code, 10000)}\n```\n\n"
@@ -474,7 +494,10 @@ def run_frontend_tests(
 
     print(f"[runtime]   Evaluating {len(ui_test_cases)} frontend test cases ...")
     try:
-        raw = llm.generate(user, system=system, temperature=0.1)
+        if screenshot_b64:
+            raw = llm.generate_with_images(user, [screenshot_b64], system=system, temperature=0.1)
+        else:
+            raw = llm.generate(user, system=system, temperature=0.1)
         verdicts = _parse_json(raw)
         if not isinstance(verdicts, list):
             verdicts = []
@@ -502,7 +525,7 @@ def run_frontend_tests(
 
 
 # ===================================================================
-# 4.  APPEARANCE (static code analysis — no Playwright yet)
+# 4.  APPEARANCE (screenshot-based with GPT-4o vision)
 # ===================================================================
 
 def run_appearance_test(
@@ -510,34 +533,75 @@ def run_appearance_test(
     task_instruction: str,
     frontend_code: str,
     frontend_healthy: bool,
+    frontend_url: str | None = None,
 ) -> AppearanceScore:
-    """Evaluate visual appearance via code analysis.
+    """Evaluate visual appearance via a screenshot (preferred) or code analysis.
 
-    When Playwright support is added, this will use a real screenshot
-    sent to GPT-4o vision instead.
+    When the frontend is healthy and Playwright is available, captures a
+    screenshot and sends it to GPT-4o vision for evaluation.  Falls back
+    to code-only analysis otherwise.
     """
-    system = (
-        "You are an expert UI/UX designer evaluator. Evaluate the visual "
-        "quality of the generated frontend code on four criteria (1-5).\n\n"
-        'Output ONLY JSON: {"layout":<1-5>,"color":<1-5>,"typography":<1-5>,'
-        '"component_polish":<1-5>,"reasoning":"..."}'
-    )
-    context_note = ""
-    if frontend_healthy:
-        context_note = (
-            "NOTE: The frontend application successfully builds, starts, and "
-            "serves HTTP 200 in Docker, which confirms the code is functional.\n\n"
+    screenshot_b64: str | None = None
+
+    if frontend_healthy and frontend_url:
+        browser_result = capture_screenshots(frontend_url)
+        if browser_result.screenshots:
+            screenshot_b64 = browser_result.screenshots[0].base64
+            print(f"[runtime]   Captured appearance screenshot ({len(browser_result.screenshots[0].png_bytes)} bytes)")
+        else:
+            reason = browser_result.error or "unknown"
+            print(f"[runtime]   Appearance screenshot failed ({reason}) — using code analysis")
+
+    if screenshot_b64:
+        system = (
+            "You are an expert UI/UX designer evaluator. You are given a "
+            "screenshot of the running frontend application and the task "
+            "description. Evaluate the visual quality on four criteria (1-5).\n\n"
+            'Output ONLY JSON: {"layout":<1-5>,"color":<1-5>,"typography":<1-5>,'
+            '"component_polish":<1-5>,"reasoning":"..."}\n\n'
+            "Criteria:\n"
+            "1. **Layout & structure** (1-5): Proper spacing, alignment, responsive "
+            "design patterns, logical component arrangement.\n"
+            "2. **Color & theming** (1-5): Consistent palette, good contrast, "
+            "professional look.\n"
+            "3. **Typography & readability** (1-5): Proper font sizing, heading "
+            "hierarchy, adequate contrast, readable text.\n"
+            "4. **Component polish** (1-5): Buttons, forms, cards, lists look "
+            "professional; hover states, transitions, proper styling.\n\n"
+            "A score of 1 means unusable/missing, 3 means acceptable, 5 means "
+            "excellent/production-ready."
         )
-    user = (
-        f"{context_note}"
-        f"## Task Description\n{task_instruction}\n\n"
-        f"## Generated Frontend Code\n```\n{_truncate(frontend_code, 12000)}\n```\n\n"
-        "Evaluate the visual quality. Respond with JSON only."
-    )
+        user = (
+            f"## Task Description\n{task_instruction}\n\n"
+            "The attached screenshot shows the live frontend application. "
+            "Evaluate the visual quality. Respond with JSON only."
+        )
+    else:
+        system = (
+            "You are an expert UI/UX designer evaluator. Evaluate the visual "
+            "quality of the generated frontend code on four criteria (1-5).\n\n"
+            'Output ONLY JSON: {"layout":<1-5>,"color":<1-5>,"typography":<1-5>,'
+            '"component_polish":<1-5>,"reasoning":"..."}'
+        )
+        context_note = ""
+        if frontend_healthy:
+            context_note = (
+                "NOTE: The frontend application successfully builds, starts, and "
+                "serves HTTP 200 in Docker, which confirms the code is functional.\n\n"
+            )
+        user = (
+            f"{context_note}"
+            f"## Task Description\n{task_instruction}\n\n"
+            f"## Generated Frontend Code\n```\n{_truncate(frontend_code, 12000)}\n```\n\n"
+            "Evaluate the visual quality. Respond with JSON only."
+        )
 
     print("[runtime]   Evaluating appearance ...")
     try:
-        raw = llm.generate(user, system=system, temperature=0.1)
+        if screenshot_b64:
+            raw = llm.generate_with_images(user, [screenshot_b64], system=system, temperature=0.1)
+        else:
+            raw = llm.generate(user, system=system, temperature=0.1)
         data = _parse_json(raw)
         layout = _clamp(data.get("layout", 1))
         color = _clamp(data.get("color", 1))
@@ -638,6 +702,7 @@ def evaluate_application_runtime(
     if frontend_code.strip():
         result.appearance = run_appearance_test(
             llm, task_instruction, frontend_code, instance.frontend_healthy,
+            frontend_url=instance.frontend_url,
         )
 
     result.compute_aggregates()
