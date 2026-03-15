@@ -89,21 +89,21 @@ artifacts/projects/collaborative-task-manager/
 
 ## Running the Benchmark
 
-The benchmark runner reads tasks from `dataset/tasks.json`, executes each task through every orchestration pattern, and records detailed metrics.
+The benchmark runner reads tasks from `dataset/tasks_with_difficulty.json`, executes each task through every orchestration pattern, and records detailed metrics.
 
 ### Quick start
 ```bash
 # Run all 100 tasks × all 6 patterns (600 runs total)
-fs-agent benchmark dataset/tasks.json
+fs-agent benchmark dataset/tasks_with_difficulty.json
 
 # Run a quick test with just 1 task and 2 patterns
-fs-agent benchmark dataset/tasks.json --max-tasks 1 --patterns sequential,parallel
+fs-agent benchmark dataset/tasks_with_difficulty.json --max-tasks 1 --patterns sequential,parallel
 
 # Run specific task IDs only
-fs-agent benchmark dataset/tasks.json --task-ids 000001,000005,000010
+fs-agent benchmark dataset/tasks_with_difficulty.json --task-ids 000001,000005,000010
 
 # Custom output directory
-fs-agent benchmark dataset/tasks.json --artifact-root artifacts/my_benchmark
+fs-agent benchmark dataset/tasks_with_difficulty.json --artifact-root artifacts/my_benchmark
 ```
 
 ### Benchmark CLI options
