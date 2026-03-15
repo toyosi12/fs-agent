@@ -103,6 +103,99 @@ def benchmark(
     )
 
 
+@app.command()
+def judge(
+    dataset: Path = typer.Argument(
+        ..., help="Path to the tasks JSON file (e.g. dataset/tasks_with_difficulty.json)"
+    ),
+    artifact_root: Path = typer.Option(
+        Path("artifacts") / "benchmark",
+        help="Root directory containing benchmark outputs to evaluate",
+    ),
+    patterns: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated list of patterns to evaluate (default: all found)",
+    ),
+    task_ids: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated list of task IDs to evaluate (default: all)",
+    ),
+    max_tasks: Optional[int] = typer.Option(
+        None,
+        help="Maximum number of tasks to evaluate",
+    ),
+    mode: str = typer.Option(
+        "static",
+        help="Evaluation mode: 'static' (code review only) or 'runtime' (boot in Docker, send real HTTP requests)",
+    ),
+) -> None:
+    """Score generated applications using the LLM-as-a-judge (GPT-4o).
+
+    Reads generated code from benchmark artifacts and evaluates:
+    - Frontend functional tests (YES / PARTIAL / NO)
+    - Backend API tests (YES / NO)
+    - Database schema tests (YES / NO)
+    - Appearance score (1-5 on four criteria)
+
+    Two modes:
+    - **static** (default): reviews generated source code only.
+    - **runtime**: boots projects in Docker, sends real HTTP requests,
+      checks the SQLite database, then evaluates responses.
+
+    Requires FS_AGENT_JUDGE_API_KEY to be set (OpenAI API key).
+    Runtime mode also requires Docker to be installed and running.
+    Results are written to <artifact-root>/results/judge_results.json
+    and judge_summary.json, tracked by task ID and difficulty level.
+    """
+
+    from .judge import run_judge
+
+    pat_list = [p.strip() for p in patterns.split(",")] if patterns else None
+    id_list = [i.strip() for i in task_ids.split(",")] if task_ids else None
+
+    results = run_judge(
+        dataset_path=dataset,
+        artifact_root=artifact_root,
+        patterns=pat_list,
+        task_ids=id_list,
+        max_tasks=max_tasks,
+        mode=mode,
+    )
+
+    # Print a rich summary table
+    table = Table(title="Judge Results", show_lines=True)
+    table.add_column("Task ID", style="cyan", no_wrap=True)
+    table.add_column("Pattern", style="magenta")
+    table.add_column("Difficulty", style="yellow")
+    table.add_column("Frontend", justify="right")
+    table.add_column("Backend", justify="right")
+    table.add_column("Database", justify="right")
+    table.add_column("Appearance", justify="right")
+    table.add_column("Error", style="red")
+
+    for r in results:
+        fe_str = f"{r.frontend_weighted_accuracy:.2f}" if r.frontend_total > 0 else "-"
+        be_str = f"{r.backend_accuracy:.2f}" if r.backend_total > 0 else "-"
+        db_str = f"{r.database_accuracy:.2f}" if r.database_total > 0 else "-"
+        ap_str = f"{r.appearance.overall:.1f}" if r.appearance else "-"
+        err_str = r.error[:40] if r.error else ""
+        table.add_row(
+            r.task_id,
+            r.pattern,
+            r.difficulty,
+            fe_str,
+            be_str,
+            db_str,
+            ap_str,
+            err_str,
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[bold green]Judge results written to:[/bold green] {artifact_root / 'results'}"
+    )
+
+
 def _print_summary(reports: Iterable[AgentReport]) -> None:
     for report in reports:
         console.rule(f"[bold cyan]{report.role.upper()} stage")
