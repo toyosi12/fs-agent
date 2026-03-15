@@ -104,12 +104,14 @@ class OpenAILLMClient(BaseLLMClient):
         *,
         base_url: str = OPENAI_BASE_URL,
         timeout: float = 500.0,
+        max_retries: int = 2,
     ) -> None:
         super().__init__(model)
         self._client = OpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
+            max_retries=max_retries,
         )
 
     def generate(self, prompt: str, *, system: str | None = None, temperature: float = 0.2) -> str:
