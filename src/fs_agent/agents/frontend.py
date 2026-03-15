@@ -234,7 +234,8 @@ class FrontendAgent(BaseAgent):
         system = (
             "You are a senior frontend engineer. Produce a JSON plan for the file-system MCP"
             " server that scaffolds a React + Vite + JavaScript project using Tailwind-ready"
-            " components. Do NOT include tsconfig.json or any TypeScript files."
+            " components. Always include a Dockerfile for the frontend."
+            " Do NOT include tsconfig.json or any TypeScript files."
         )
         prompt = (
             f"User request: {context.user_request}\n"
@@ -358,6 +359,10 @@ class FrontendAgent(BaseAgent):
                 "description": "Vitest + React Testing Library component tests",
                 "body": self._render_fallback_tests(routes),
             },
+            "Dockerfile": {
+                "description": "Docker image for the frontend service",
+                "body": self._render_dockerfile(),
+            },
         }
 
     def _render_readme(
@@ -418,6 +423,20 @@ class FrontendAgent(BaseAgent):
             },
         }
         return json.dumps(package, indent=2)
+
+    def _render_dockerfile(self) -> str:
+        return (
+            "FROM node:20-alpine AS build\n\n"
+            "WORKDIR /app\n\n"
+            "COPY package*.json ./\n"
+            "RUN npm ci\n\n"
+            "COPY . .\n"
+            "RUN npm run build\n\n"
+            "FROM nginx:alpine\n"
+            "COPY --from=build /app/dist /usr/share/nginx/html\n"
+            "EXPOSE 80\n"
+            "CMD [\"nginx\", \"-g\", \"daemon off;\"]\n"
+        )
 
     def _render_vite_config(self) -> str:
         return (
