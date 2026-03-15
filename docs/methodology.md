@@ -129,7 +129,7 @@ The critic uses temperature 0.0 and a structured JSON response format. If the cr
 
 ### 4.1 Dataset
 
-The benchmark uses a curated dataset of 100 full-stack web application tasks (`dataset/tasks.json`). Each task contains:
+The benchmark uses a curated dataset of 100 full-stack web application tasks (`dataset/tasks_with_difficulty.json`). Each task contains:
 
 - **`id`**: A unique six-digit identifier (e.g., `000001`).
 - **`instruction`**: A natural-language product brief describing the desired application, its features, and UI styling preferences.

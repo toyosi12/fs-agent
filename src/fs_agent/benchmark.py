@@ -1,6 +1,6 @@
 """Benchmark runner — executes every orchestration pattern against a task dataset.
 
-Reads tasks from ``dataset/tasks.json``, runs each task through every
+Reads tasks from ``dataset/tasks_with_difficulty.json``, runs each task through every
 orchestration pattern, and records rich metrics (token usage, wall-clock
 time, coordination overhead, agent-level timings, etc.).
 
@@ -325,18 +325,19 @@ def run_single(
 # ---------------------------------------------------------------------------
 
 def load_tasks(dataset_path: Path) -> list[dict[str, Any]]:
-    """Load tasks from the dataset JSON file."""
+    """Load tasks from the dataset JSON file.
+
+    Preserves all task fields (ui_instruct, backend_test_cases,
+    data_structures, difficulty, etc.) for downstream evaluation.
+    """
     raw = json.loads(dataset_path.read_text(encoding="utf-8"))
     rows = raw.get("rows", raw if isinstance(raw, list) else [])
     tasks: list[dict[str, Any]] = []
     for entry in rows:
         row = entry.get("row", entry)
-        tasks.append(
-            {
-                "id": str(row.get("id", row.get("row_idx", len(tasks)))),
-                "instruction": row["instruction"],
-            }
-        )
+        task = dict(row)
+        task["id"] = str(task.get("id", task.get("row_idx", len(tasks))))
+        tasks.append(task)
     return tasks
 
 
@@ -353,7 +354,7 @@ def run_benchmark(
     Parameters
     ----------
     dataset_path:
-        Path to ``dataset/tasks.json``.
+        Path to ``dataset/tasks_with_difficulty.json``.
     patterns:
         Subset of patterns to benchmark (default: all six).
     task_ids:

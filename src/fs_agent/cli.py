@@ -39,7 +39,7 @@ def run(
 @app.command()
 def benchmark(
     dataset: Path = typer.Argument(
-        ..., help="Path to the tasks JSON file (e.g. dataset/tasks.json)"
+        ..., help="Path to the tasks JSON file (e.g. dataset/tasks_with_difficulty.json)"
     ),
     patterns: Optional[str] = typer.Option(
         None,
