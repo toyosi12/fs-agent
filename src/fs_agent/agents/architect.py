@@ -91,15 +91,15 @@ class ArchitectAgent(BaseAgent):
             "request_schema (object mapping field names to types/descriptions), "
             "response_schema (same), and errors (list of strings like '400 invalid payload').\n"
             "- Include data_models with fields as {fieldName: typeString} mappings.\n"
-            "- If a database is needed, populate backend.database with provider, models "
+            "- If a database is needed, populate backend.database with provider (use 'sqlite'), models "
             "(with table_name, fields, relationships, indexes), and migrations (with name, "
-            "up SQL, down SQL).\n"
+            "up SQL using SQLite syntax, down SQL).\n"
             "- frontend.routes must reference backend endpoints via consumes.\n"
             "- frontend.components lists reusable UI components with props and consumes.\n"
             "- frontend.theme can capture color/styling tokens from the brief.\n"
             "- infra.targets must be objects with name, environment (dev|staging|test|prod), "
             "description, and runtime (docker|serverless|kubernetes).\n"
-            "- Include at least two infra targets (dev and prod).\n"
+            "- Include at least two infra targets (dev and prod), both using 'docker' runtime.\n"
         )
         # Allow a dedicated provider/model for the architect via
         # FS_AGENT_LLM_PROVIDER_ARCHITECT / FS_AGENT_LLM_MODEL_ARCHITECT.

@@ -127,9 +127,10 @@ class BackendAgent(BaseAgent):
         )
         if blueprint.get("database"):
             prompt += (
-                "Use the mysql2/promise package to query a MySQL database. "
-                "Import the pool from '../db.js'. Write real SQL queries (SELECT, INSERT, "
+                "Use the better-sqlite3 package to query a SQLite database. "
+                "Import the db instance from '../db.js'. Write real SQL queries (SELECT, INSERT, "
                 "UPDATE, DELETE) against the tables defined in the data models. "
+                "Use db.prepare(sql).all() for reads and db.prepare(sql).run() for writes. "
                 "Handle database errors with try/catch and return 500 on failure. "
             )
         else:
@@ -154,7 +155,7 @@ class BackendAgent(BaseAgent):
         )
         if blueprint.get("database"):
             system += (
-                " Use mysql2/promise for all database access. Import the pool from '../db.js'."
+                " Use better-sqlite3 for all database access. Import the db instance from '../db.js'."
             )
         try:
             # Use backend-specific LLM if configured.
@@ -256,12 +257,12 @@ class BackendAgent(BaseAgent):
             "You are an expert Node.js platform engineer. Given a backend specification,"
             " produce a JSON plan for the file-system MCP server that scaffolds an Express"
             " + JavaScript project. Always include package.json, src/app.js,"
-            " src/server.js, src/routes/index.js, and src/routes/generated.js."
+            " src/server.js, src/routes/index.js, src/routes/generated.js, and a Dockerfile."
             " Do NOT include tsconfig.json or any TypeScript files."
         )
         if migration_files:
             system += (
-                " Also include src/db.js (MySQL connection pool), src/migrate.js (migration runner),"
+                " Also include src/db.js (SQLite database connection), src/migrate.js (migration runner),"
                 " and all migration SQL files under migrations/."
             )
         prompt = (
@@ -388,7 +389,7 @@ class BackendAgent(BaseAgent):
         }
         if migration_files:
             files["src/db.js"] = {
-                "description": "MySQL connection pool",
+                "description": "SQLite database connection",
                 "body": self._render_db_js(),
             }
             files["src/migrate.js"] = {
@@ -397,12 +398,16 @@ class BackendAgent(BaseAgent):
             }
             for path, contents in migration_files.items():
                 files[path] = {
-                    "description": f"MySQL migration: {path}",
+                    "description": f"SQLite migration: {path}",
                     "body": contents,
                 }
         files["__tests__/routes.test.js"] = {
             "description": "Jest + supertest endpoint tests",
             "body": self._render_fallback_tests(blueprint),
+        }
+        files["Dockerfile"] = {
+            "description": "Docker image for the backend service",
+            "body": self._render_dockerfile(),
         }
         return files
 
@@ -426,7 +431,7 @@ class BackendAgent(BaseAgent):
             "## Setup\n"
             "```bash\n"
             "npm install\n"
-            "cp .env.example .env  # edit with your MySQL credentials\n"
+            "cp .env.example .env  # edit if you need a custom SQLite path\n"
             "npm run migrate       # run database migrations\n"
             "npm run dev           # start dev server with hot-reload\n"
             "npm start             # start production server\n"
@@ -448,7 +453,7 @@ class BackendAgent(BaseAgent):
         }
         if has_db:
             scripts["migrate"] = "node src/migrate.js"
-            deps["mysql2"] = "^3.11.0"
+            deps["better-sqlite3"] = "^11.0.0"
         package = {
             "name": self._slugify(f"{metadata.name}-backend"),
             "version": metadata.version or "0.1.0",
@@ -511,7 +516,7 @@ class BackendAgent(BaseAgent):
     def _generate_migrations(
         self, context: RunContext, blueprint: dict[str, Any]
     ) -> dict[str, str]:
-        """Generate ready-to-run MySQL migration SQL files.
+        """Generate ready-to-run SQLite migration SQL files.
 
         Returns a dict of {relative_path: sql_contents}.
         """
@@ -534,14 +539,15 @@ class BackendAgent(BaseAgent):
             )
 
         system = (
-            "You are a senior database engineer. Produce ready-to-run MySQL migration "
+            "You are a senior database engineer. Produce ready-to-run SQLite migration "
             "SQL files. Each migration must be a complete, valid SQL script. Use "
-            "CREATE TABLE IF NOT EXISTS, proper column types (INT, VARCHAR, TEXT, "
-            "DATETIME, BOOLEAN, etc.), PRIMARY KEY, FOREIGN KEY constraints, and indexes. "
+            "CREATE TABLE IF NOT EXISTS, proper column types (INTEGER, TEXT, REAL, "
+            "BLOB, NUMERIC), PRIMARY KEY with AUTOINCREMENT, and indexes. "
+            "Do NOT use MySQL-specific syntax like AUTO_INCREMENT, ENGINE=, or CHARSET=. "
             "Output valid JSON only."
         )
         prompt = (
-            f"Generate MySQL migration SQL files for these data models:\n{models_json}"
+            f"Generate SQLite migration SQL files for these data models:\n{models_json}"
             f"{migrations_hint}\n\n"
             "Return a JSON object where each key is a file path like "
             "\"migrations/001_create_users.sql\" and the value is the full SQL contents.\n"
@@ -579,53 +585,51 @@ class BackendAgent(BaseAgent):
             seq = str(i).zfill(3)
             filename = f"migrations/{seq}_create_{table}.sql"
 
-            col_lines = ["  id INT AUTO_INCREMENT PRIMARY KEY"]
+            col_lines = ["  id INTEGER PRIMARY KEY AUTOINCREMENT"]
             for field_name, field_type in fields.items():
                 if field_name.lower() == "id":
                     continue
-                mysql_type = self._js_type_to_mysql(field_type)
-                col_lines.append(f"  {field_name} {mysql_type}")
+                sqlite_type = self._js_type_to_sqlite(field_type)
+                col_lines.append(f"  {field_name} {sqlite_type}")
 
-            col_lines.append("  created_at DATETIME DEFAULT CURRENT_TIMESTAMP")
-            col_lines.append(
-                "  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
-            )
+            col_lines.append("  created_at TEXT DEFAULT (datetime('now'))")
+            col_lines.append("  updated_at TEXT DEFAULT (datetime('now'))")
 
             sql = (
                 f"-- Migration: Create {table}\n\n"
                 f"CREATE TABLE IF NOT EXISTS {table} (\n"
                 + ",\n".join(col_lines)
-                + "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+                + "\n);\n"
             )
 
             indexes = model.get("indexes", [])
             for idx in indexes:
                 idx_name = f"idx_{table}_{idx}"
-                sql += f"\nCREATE INDEX {idx_name} ON {table} ({idx});\n"
+                sql += f"\nCREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({idx});\n"
 
             files[filename] = sql
         return files
 
-    def _js_type_to_mysql(self, js_type: str) -> str:
-        """Map JavaScript/generic type strings to MySQL column types."""
+    def _js_type_to_sqlite(self, js_type: str) -> str:
+        """Map JavaScript/generic type strings to SQLite column types."""
         t = str(js_type).lower().strip()
         mapping = {
-            "string": "VARCHAR(255)",
+            "string": "TEXT",
             "text": "TEXT",
-            "number": "INT",
-            "integer": "INT",
-            "int": "INT",
-            "float": "DECIMAL(10,2)",
-            "decimal": "DECIMAL(10,2)",
-            "boolean": "TINYINT(1) DEFAULT 0",
-            "bool": "TINYINT(1) DEFAULT 0",
-            "date": "DATE",
-            "datetime": "DATETIME",
-            "timestamp": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-            "json": "JSON",
-            "uuid": "CHAR(36)",
+            "number": "INTEGER",
+            "integer": "INTEGER",
+            "int": "INTEGER",
+            "float": "REAL",
+            "decimal": "REAL",
+            "boolean": "INTEGER DEFAULT 0",
+            "bool": "INTEGER DEFAULT 0",
+            "date": "TEXT",
+            "datetime": "TEXT",
+            "timestamp": "TEXT DEFAULT (datetime('now'))",
+            "json": "TEXT",
+            "uuid": "TEXT",
         }
-        return mapping.get(t, "VARCHAR(255)")
+        return mapping.get(t, "TEXT")
 
     def _strip_code_fences(self, text: str) -> str:
         stripped = text.strip()
@@ -642,20 +646,21 @@ class BackendAgent(BaseAgent):
 
     def _render_db_js(self) -> str:
         return (
-            "import mysql from 'mysql2/promise';\n"
+            "import Database from 'better-sqlite3';\n"
+            "import path from 'path';\n"
+            "import { fileURLToPath } from 'url';\n"
             "import dotenv from 'dotenv';\n\n"
             "dotenv.config();\n\n"
-            "const pool = mysql.createPool({\n"
-            "  host: process.env.DB_HOST || 'localhost',\n"
-            "  port: Number(process.env.DB_PORT || 3306),\n"
-            "  user: process.env.DB_USER || 'root',\n"
-            "  password: process.env.DB_PASSWORD || '',\n"
-            "  database: process.env.DB_NAME || 'app_db',\n"
-            "  waitForConnections: true,\n"
-            "  connectionLimit: 10,\n"
-            "  queueLimit: 0,\n"
-            "});\n\n"
-            "export default pool;\n"
+            "const __dirname = path.dirname(fileURLToPath(import.meta.url));\n"
+            "const dbPath = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'app.db');\n\n"
+            "// Ensure the data directory exists\n"
+            "import fs from 'fs';\n"
+            "fs.mkdirSync(path.dirname(dbPath), { recursive: true });\n\n"
+            "const db = new Database(dbPath);\n\n"
+            "// Enable WAL mode for better concurrent read performance\n"
+            "db.pragma('journal_mode = WAL');\n"
+            "db.pragma('foreign_keys = ON');\n\n"
+            "export default db;\n"
         )
 
     def _render_migrate_js(self) -> str:
@@ -663,48 +668,41 @@ class BackendAgent(BaseAgent):
             "import fs from 'fs';\n"
             "import path from 'path';\n"
             "import { fileURLToPath } from 'url';\n"
-            "import pool from './db.js';\n\n"
+            "import db from './db.js';\n\n"
             "const __dirname = path.dirname(fileURLToPath(import.meta.url));\n"
             "const migrationsDir = path.join(__dirname, '..', 'migrations');\n\n"
-            "async function migrate() {\n"
-            "  const conn = await pool.getConnection();\n"
-            "  try {\n"
-            "    // Create migrations tracking table\n"
-            "    await conn.execute(`\n"
-            "      CREATE TABLE IF NOT EXISTS _migrations (\n"
-            "        id INT AUTO_INCREMENT PRIMARY KEY,\n"
-            "        name VARCHAR(255) NOT NULL UNIQUE,\n"
-            "        applied_at DATETIME DEFAULT CURRENT_TIMESTAMP\n"
-            "      )\n"
-            "    `);\n\n"
-            "    const [applied] = await conn.execute('SELECT name FROM _migrations');\n"
-            "    const appliedSet = new Set(applied.map(r => r.name));\n\n"
-            "    const files = fs.readdirSync(migrationsDir)\n"
-            "      .filter(f => f.endsWith('.sql'))\n"
-            "      .sort();\n\n"
-            "    for (const file of files) {\n"
-            "      if (appliedSet.has(file)) {\n"
-            "        console.log(`  skip: ${file} (already applied)`);\n"
-            "        continue;\n"
-            "      }\n"
-            "      const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');\n"
-            "      console.log(`  run:  ${file}`);\n"
-            "      const statements = sql.split(';').map(s => s.trim()).filter(Boolean);\n"
-            "      for (const stmt of statements) {\n"
-            "        await conn.execute(stmt);\n"
-            "      }\n"
-            "      await conn.execute('INSERT INTO _migrations (name) VALUES (?)', [file]);\n"
-            "    }\n\n"
-            "    console.log('Migrations complete.');\n"
-            "  } finally {\n"
-            "    conn.release();\n"
-            "    await pool.end();\n"
-            "  }\n"
+            "function migrate() {\n"
+            "  // Create migrations tracking table\n"
+            "  db.exec(`\n"
+            "    CREATE TABLE IF NOT EXISTS _migrations (\n"
+            "      id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+            "      name TEXT NOT NULL UNIQUE,\n"
+            "      applied_at TEXT DEFAULT (datetime('now'))\n"
+            "    )\n"
+            "  `);\n\n"
+            "  const applied = db.prepare('SELECT name FROM _migrations').all();\n"
+            "  const appliedSet = new Set(applied.map(r => r.name));\n\n"
+            "  const files = fs.readdirSync(migrationsDir)\n"
+            "    .filter(f => f.endsWith('.sql'))\n"
+            "    .sort();\n\n"
+            "  for (const file of files) {\n"
+            "    if (appliedSet.has(file)) {\n"
+            "      console.log(`  skip: ${file} (already applied)`);\n"
+            "      continue;\n"
+            "    }\n"
+            "    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');\n"
+            "    console.log(`  run:  ${file}`);\n"
+            "    db.exec(sql);\n"
+            "    db.prepare('INSERT INTO _migrations (name) VALUES (?)').run(file);\n"
+            "  }\n\n"
+            "  console.log('Migrations complete.');\n"
             "}\n\n"
-            "migrate().catch(err => {\n"
+            "try {\n"
+            "  migrate();\n"
+            "} catch (err) {\n"
             "  console.error('Migration failed:', err);\n"
             "  process.exit(1);\n"
-            "});\n"
+            "}\n"
         )
 
     def _render_env_example(self, blueprint: dict[str, Any]) -> str:
@@ -714,14 +712,23 @@ class BackendAgent(BaseAgent):
         if blueprint.get("database"):
             lines.extend([
                 "",
-                "# MySQL connection",
-                "DB_HOST=localhost",
-                "DB_PORT=3306",
-                "DB_USER=root",
-                "DB_PASSWORD=",
-                "DB_NAME=app_db",
+                "# SQLite database path (relative to project root)",
+                "DB_PATH=./data/app.db",
             ])
         return "\n".join(lines) + "\n"
+
+    def _render_dockerfile(self) -> str:
+        return (
+            "FROM node:20-alpine\n\n"
+            "WORKDIR /app\n\n"
+            "COPY package*.json ./\n"
+            "RUN npm ci --omit=dev\n\n"
+            "COPY . .\n\n"
+            "# Create data directory for SQLite\n"
+            "RUN mkdir -p /app/data\n\n"
+            "EXPOSE 4000\n\n"
+            "CMD [\"node\", \"src/server.js\"]\n"
+        )
 
     def _slugify(self, value: str) -> str:
         value = value.lower()

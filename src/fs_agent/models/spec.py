@@ -63,7 +63,7 @@ class Migration(BaseModel):
 
 
 class DatabaseSpec(BaseModel):
-    provider: Literal["postgres", "mysql", "sqlite", "mongodb"] = "mysql"
+    provider: Literal["postgres", "mysql", "sqlite", "mongodb"] = "sqlite"
     models: list[DataModel] = Field(default_factory=list)
     migrations: list[Migration] = Field(default_factory=list)
 
