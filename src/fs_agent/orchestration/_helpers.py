@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Sequence
 
 from ..artifact_writer import persist_agent_output
 from ..context import AgentReport, RunContext
 from ..agents.base import AgentRole, BaseAgent
 from .metrics import AgentExecution
+
+if TYPE_CHECKING:
+    from .metrics import OrchestrationMetrics
+    from .registry import AgentRegistry
 
 
 def execute_agent(
@@ -26,7 +31,7 @@ def execute_agent(
     Parameters
     ----------
     attempt:
-        Attempt number (>1 when the iterative pattern retries an agent).
+        Attempt number (>1 when the validation loop retries an agent).
     """
     from ..logger import get_logger
 
@@ -92,3 +97,140 @@ def execute_agent(
         result.status,
     )
     return report, execution
+
+
+# ---------------------------------------------------------------------------
+# Validation loop
+# ---------------------------------------------------------------------------
+
+# Maps validation component names to the agent role responsible for fixing them.
+_COMPONENT_TO_ROLE: dict[str, AgentRole] = {
+    "backend": AgentRole.BACKEND,
+    "frontend": AgentRole.FRONTEND,
+    "infra": AgentRole.INFRA,
+    "integration": AgentRole.BACKEND,  # integration issues default to backend
+    "project": AgentRole.INFRA,
+}
+
+
+def run_validation_loop(
+    context: RunContext,
+    registry: "AgentRegistry",
+    reports: list[AgentReport],
+    metrics: "OrchestrationMetrics",
+    *,
+    max_retries: int | None = None,
+    pattern_name: str = "",
+) -> list[AgentReport]:
+    """Run post-generation validation and re-run failing agents.
+
+    After all agents have completed their initial run, this function:
+    1. Validates the generated project directory.
+    2. If validation passes, returns the reports as-is.
+    3. If validation fails and retries remain, identifies the responsible
+       agents, injects error feedback into the context, re-runs them,
+       and validates again.
+
+    Parameters
+    ----------
+    context:
+        The shared run context (contains project paths and settings).
+    registry:
+        Agent registry for building agents.
+    reports:
+        List of agent reports from the initial run.
+    metrics:
+        Orchestration metrics to record retry executions.
+    max_retries:
+        Maximum number of validation-retry iterations. If None, reads
+        from ``context.settings.max_validation_retries``.
+    pattern_name:
+        Name of the orchestration pattern (for logging).
+
+    Returns
+    -------
+    Updated list of agent reports (may include retry reports appended).
+    """
+    from ..logger import get_logger
+    from ..validation import validate_project, ValidationResult
+
+    logger = get_logger(f"orchestration.validation.{pattern_name or 'loop'}")
+
+    if max_retries is None:
+        max_retries = context.settings.max_validation_retries
+
+    if max_retries <= 0:
+        logger.info("Validation retries disabled (max_retries=0)")
+        return reports
+
+    project_dir = context.projects_dir
+    if not project_dir.exists():
+        logger.warning(
+            "Project directory %s does not exist — skipping validation", project_dir
+        )
+        return reports
+
+    for iteration in range(1, max_retries + 1):
+        result = validate_project(project_dir)
+        logger.info(
+            "Validation iteration %d/%d: %s",
+            iteration, max_retries, result.summary(),
+        )
+
+        if result.passed:
+            logger.info("✓ Validation passed on iteration %d", iteration)
+            return reports
+
+        # Determine which agents need to re-run
+        failed_components = {
+            issue.component
+            for issue in result.issues
+            if issue.severity == "error"
+        }
+        roles_to_retry: set[AgentRole] = set()
+        for comp in failed_components:
+            role = _COMPONENT_TO_ROLE.get(comp)
+            if role:
+                roles_to_retry.add(role)
+
+        if not roles_to_retry:
+            logger.warning(
+                "Validation has errors but no responsible agents identified"
+            )
+            return reports
+
+        # Inject validation feedback into user_request so agents see it
+        feedback = result.feedback_prompt()
+        original_request = context.user_request
+        context.user_request = f"{original_request}\n\n{feedback}"
+
+        logger.info(
+            "Re-running agents %s (iteration %d/%d) to fix %d errors",
+            [r.value for r in roles_to_retry],
+            iteration,
+            max_retries,
+            result.error_count,
+        )
+
+        for role in roles_to_retry:
+            agent = registry.build(role)
+            report, execution = execute_agent(
+                agent, role, context, attempt=iteration + 1
+            )
+            metrics.record_agent_execution(execution)
+            reports.append(report)
+
+        # Restore original request for next iteration
+        context.user_request = original_request
+
+    # Final validation check after all retries
+    final_result = validate_project(project_dir)
+    if not final_result.passed:
+        logger.warning(
+            "Validation still failing after %d retries: %s",
+            max_retries, final_result.summary(),
+        )
+    else:
+        logger.info("✓ Validation passed after retries")
+
+    return reports

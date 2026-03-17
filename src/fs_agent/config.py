@@ -13,9 +13,12 @@ from pydantic import BaseModel, Field
 class Settings(BaseModel):
     """Top-level runtime configuration."""
 
-    orchestration_pattern: Literal["sequential", "centralized", "decentralized", "hierarchical", "parallel", "iterative"] = "sequential"
+    orchestration_pattern: Literal["sequential", "centralized", "decentralized", "hierarchical", "parallel"] = "sequential"
     artifact_dir: Path = Field(default_factory=lambda: Path("artifacts"))
     dry_run: bool = False
+    max_validation_retries: int = Field(
+        default_factory=lambda: int(os.getenv("FS_AGENT_MAX_VALIDATION_RETRIES", "3"))
+    )
     llm_provider: Literal["dummy", "openai", "qwen", "auto"] = Field(
         default_factory=lambda: os.getenv("FS_AGENT_LLM_PROVIDER", "dummy")
     )

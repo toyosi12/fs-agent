@@ -32,7 +32,6 @@ from .orchestration import (
     CentralizedOrchestrator,
     DecentralizedOrchestrator,
     HierarchicalOrchestrator,
-    IterativeRefinementOrchestrator,
     OrchestrationError,
     OrchestrationMetrics,
     ParallelOrchestrator,
@@ -48,7 +47,6 @@ ALL_PATTERNS: list[str] = [
     "decentralized",
     "hierarchical",
     "parallel",
-    "iterative",
 ]
 
 
@@ -143,8 +141,6 @@ def _build_pattern(
         return HierarchicalOrchestrator(registry=registry, llm=llm)
     if name == "parallel":
         return ParallelOrchestrator(registry=registry)
-    if name == "iterative":
-        return IterativeRefinementOrchestrator(registry=registry, llm=llm)
     raise ValueError(f"Unknown pattern: {name}")
 
 
@@ -348,22 +344,9 @@ def run_benchmark(
     task_ids: list[str] | None = None,
     max_tasks: int | None = None,
     artifact_root: Path | None = None,
+    max_validation_retries: int | None = None,
 ) -> list[RunMetrics]:
-    """Run the full benchmark and write results to disk.
-
-    Parameters
-    ----------
-    dataset_path:
-        Path to ``dataset/tasks_with_difficulty.json``.
-    patterns:
-        Subset of patterns to benchmark (default: all six).
-    task_ids:
-        If given, only run these task IDs.
-    max_tasks:
-        Cap on the number of tasks to process (useful for quick tests).
-    artifact_root:
-        Root directory for benchmark artefacts.  Defaults to ``artifacts/benchmark/``.
-    """
+    """Run the full benchmark and write results to disk."""
 
     from dotenv import load_dotenv
 
@@ -371,6 +354,10 @@ def run_benchmark(
 
     get_settings.cache_clear()
     base_settings = get_settings()
+    if max_validation_retries is not None:
+        base_settings = base_settings.model_copy(
+            update={"max_validation_retries": max_validation_retries}
+        )
 
     patterns = patterns or list(ALL_PATTERNS)
     artifact_root = artifact_root or Path("artifacts") / "benchmark"

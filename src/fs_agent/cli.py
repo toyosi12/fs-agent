@@ -21,7 +21,8 @@ def run(
     request: str = typer.Argument(..., help="Natural language description of the desired app"),
     artifact_dir: Path | None = typer.Option(None, help="Directory to store generated artifacts"),
     dry_run: bool = typer.Option(False, help="Skip shell-side effects and focus on planning"),
-    pattern: str = typer.Option("sequential", help="Orchestration pattern: sequential or centralized"),
+    pattern: str = typer.Option("sequential", help="Orchestration pattern: sequential, centralized, decentralized, hierarchical, or parallel"),
+    max_validation_retries: int = typer.Option(3, "--max-retries", help="Maximum validation-retry iterations (0 to disable)"),
 ) -> None:
     """Execute the orchestrator against a project spec."""
 
@@ -31,6 +32,7 @@ def run(
             artifact_dir=artifact_dir,
             dry_run=dry_run,
             orchestration_pattern=pattern,
+            max_validation_retries=max_validation_retries,
         )
     )
     _print_summary(reports)
@@ -43,7 +45,7 @@ def benchmark(
     ),
     patterns: Optional[str] = typer.Option(
         None,
-        help="Comma-separated list of patterns to benchmark (default: all six)",
+        help="Comma-separated list of patterns to benchmark (default: all five)",
     ),
     task_ids: Optional[str] = typer.Option(
         None,
@@ -52,6 +54,11 @@ def benchmark(
     max_tasks: Optional[int] = typer.Option(
         None,
         help="Maximum number of tasks to process (useful for quick tests)",
+    ),
+    max_validation_retries: int = typer.Option(
+        3,
+        "--max-retries",
+        help="Maximum validation-retry iterations per pattern run (0 to disable)",
     ),
     artifact_root: Path = typer.Option(
         Path("artifacts") / "benchmark",
@@ -71,6 +78,7 @@ def benchmark(
         task_ids=id_list,
         max_tasks=max_tasks,
         artifact_root=artifact_root,
+        max_validation_retries=max_validation_retries,
     )
 
     # Print a rich summary table

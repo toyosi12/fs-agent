@@ -33,7 +33,6 @@ ALL_PATTERNS: list[str] = [
     "decentralized",
     "hierarchical",
     "parallel",
-    "iterative",
 ]
 
 
