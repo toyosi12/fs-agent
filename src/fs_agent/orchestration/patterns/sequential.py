@@ -13,7 +13,7 @@ from ...logger import get_logger
 from ..base import OrchestrationPattern
 from ..registry import AgentRegistry
 from ...agents.base import AgentRole
-from .._helpers import execute_agent
+from .._helpers import execute_agent, run_validation_loop
 
 
 class SequentialOrchestrator(OrchestrationPattern):
@@ -62,6 +62,12 @@ class SequentialOrchestrator(OrchestrationPattern):
                 reports.append(report)
 
             m.success = True
+
+            # --- Validation loop ---
+            reports = run_validation_loop(
+                context, self.registry, reports, m,
+                pattern_name="sequential",
+            )
 
         except Exception as exc:
             m.success = False

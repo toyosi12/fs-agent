@@ -19,7 +19,7 @@ Python-based multi-agent orchestrator that drafts full-stack JavaScript applicat
 7. **Benchmark Runner** – Reads tasks from a dataset, runs every pattern, and produces metrics reports.
 
 ## Orchestration Patterns
-Six patterns are available, selectable via the `--pattern` flag:
+Five patterns are available, selectable via the `--pattern` flag:
 
 | Pattern | Description |
 |---|---|
@@ -28,7 +28,16 @@ Six patterns are available, selectable via the `--pattern` flag:
 | `decentralized` | Each agent decides who should handle the work next (handoff routing) |
 | `hierarchical` | Two-level supervisor tree — root picks a phase, phase supervisor picks an agent |
 | `parallel` | Fan-out/fan-in — independent agents run concurrently via ThreadPoolExecutor |
-| `iterative` | Critic-driven retry loop — an LLM critic scores each agent's output and triggers retries |
+
+### Post-Generation Validation
+Each pattern runs a validation loop after agents complete. The loop checks:
+- Required files exist (package.json, entry points, Dockerfiles)
+- No LLM markdown fences left in source files
+- Frontend ↔ Backend API wiring (port consistency, proxy setup)
+- Database config sync (better-sqlite3 dependency, DB_PATH consistency)
+- Dockerfile build feasibility (devDeps available for build step)
+
+If validation fails, the responsible agents are re-run with error feedback. Retries are configurable via `--max-retries` (default: 3, set to 0 to disable).
 
 ## Setup
 
@@ -125,8 +134,7 @@ artifacts/benchmark/
 │   ├── centralized/
 │   ├── decentralized/
 │   ├── hierarchical/
-│   ├── parallel/
-│   └── iterative/
+│   └── parallel/
 ├── 000002/
 │   └── …
 └── results/

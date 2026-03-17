@@ -44,13 +44,13 @@ class CoordinationCall:
 class AgentExecution:
     """Metrics for a single agent dispatch within one orchestration run.
 
-    For iterative refinement, multiple :class:`AgentExecution` records may
+    With validation retries, multiple :class:`AgentExecution` records may
     exist for the same role (one per attempt).
     """
 
     role: str
     status: str  # "success" or "error"
-    attempt: int = 1  # 1 for first try, 2+ for retries (iterative pattern)
+    attempt: int = 1  # 1 for first try, 2+ for validation retries
     duration_seconds: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0

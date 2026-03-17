@@ -18,7 +18,7 @@ from ..base import OrchestrationPattern
 from ..metrics import AgentExecution
 from ..registry import AgentRegistry
 from ...agents.base import AgentRole
-from .._helpers import execute_agent
+from .._helpers import execute_agent, run_validation_loop
 
 
 @dataclass
@@ -120,6 +120,12 @@ class ParallelOrchestrator(OrchestrationPattern):
                     all_reports.extend(stage_reports)
 
             m.success = True
+
+            # --- Validation loop ---
+            all_reports = run_validation_loop(
+                context, self.registry, all_reports, m,
+                pattern_name="parallel",
+            )
 
         except Exception as exc:
             m.success = False
