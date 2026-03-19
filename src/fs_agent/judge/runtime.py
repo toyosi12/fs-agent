@@ -41,6 +41,7 @@ from .models import (
     FrontendTestScore,
     FrontendVerdict,
     JudgeResult,
+    JudgeTrace,
 )
 
 logger = get_logger(__name__)
@@ -76,6 +77,7 @@ def _generate_request_specs(
     llm: BaseLLMClient,
     backend_code: str,
     test_cases: list[dict],
+    trace: JudgeTrace | None = None,
 ) -> list[dict]:
     """Ask the LLM to produce concrete HTTP request specs for all test cases.
 
@@ -113,10 +115,27 @@ def _generate_request_specs(
         "Produce the JSON array."
     )
 
+    t0 = time.monotonic()
     raw = llm.generate(user, system=system, temperature=0.1)
+    latency = time.monotonic() - t0
     specs = _parse_json(raw)
     if not isinstance(specs, list):
+        if trace:
+            trace.add_llm_call(
+                "backend_generate_specs",
+                system_prompt=system, user_prompt=user,
+                raw_response=raw, parsed_result=specs,
+                error="Response was not a list",
+                latency_seconds=latency, model=llm.model,
+            )
         return []
+    if trace:
+        trace.add_llm_call(
+            "backend_generate_specs",
+            system_prompt=system, user_prompt=user,
+            raw_response=raw, parsed_result=specs,
+            latency_seconds=latency, model=llm.model,
+        )
     return specs
 
 
@@ -124,6 +143,7 @@ def _execute_requests(
     base_url: str,
     specs: list[dict],
     timeout: float = 10.0,
+    trace: JudgeTrace | None = None,
 ) -> list[dict]:
     """Execute each HTTP request spec against the running backend.
 
@@ -138,8 +158,10 @@ def _execute_requests(
             headers = spec.get("headers") or {}
             body = spec.get("body")
             params = spec.get("query_params")
+            idx = spec.get("test_index", len(results))
 
             try:
+                t0 = time.monotonic()
                 resp = client.request(
                     method,
                     path,
@@ -147,19 +169,39 @@ def _execute_requests(
                     json=body if body is not None else None,
                     params=params,
                 )
+                latency = time.monotonic() - t0
+                resp_body = resp.text[:4000]
                 results.append({
-                    "test_index": spec.get("test_index", len(results)),
+                    "test_index": idx,
                     "status_code": resp.status_code,
-                    "body": resp.text[:4000],
+                    "body": resp_body,
                     "error": None,
                 })
+                if trace:
+                    trace.add_http_request(
+                        f"backend_http_{idx}",
+                        method=method,
+                        url=f"{base_url}{path}",
+                        request_body=body,
+                        status_code=resp.status_code,
+                        response_body=resp_body,
+                        latency_seconds=latency,
+                    )
             except httpx.HTTPError as exc:
                 results.append({
-                    "test_index": spec.get("test_index", len(results)),
+                    "test_index": idx,
                     "status_code": None,
                     "body": "",
                     "error": str(exc),
                 })
+                if trace:
+                    trace.add_http_request(
+                        f"backend_http_{idx}",
+                        method=method,
+                        url=f"{base_url}{path}",
+                        request_body=body,
+                        error=str(exc),
+                    )
     return results
 
 
@@ -168,6 +210,7 @@ def _evaluate_responses(
     test_cases: list[dict],
     specs: list[dict],
     responses: list[dict],
+    trace: JudgeTrace | None = None,
 ) -> list[dict]:
     """Ask the LLM to judge each HTTP response against the expected result.
 
@@ -207,10 +250,27 @@ def _evaluate_responses(
     )
     user = "\n".join(entries) + "\n\nEvaluate each test."
 
+    t0 = time.monotonic()
     raw = llm.generate(user, system=system, temperature=0.1)
+    latency = time.monotonic() - t0
     verdicts = _parse_json(raw)
     if not isinstance(verdicts, list):
+        if trace:
+            trace.add_llm_call(
+                "backend_evaluate_responses",
+                system_prompt=system, user_prompt=user,
+                raw_response=raw, parsed_result=verdicts,
+                error="Response was not a list",
+                latency_seconds=latency, model=llm.model,
+            )
         return []
+    if trace:
+        trace.add_llm_call(
+            "backend_evaluate_responses",
+            system_prompt=system, user_prompt=user,
+            raw_response=raw, parsed_result=verdicts,
+            latency_seconds=latency, model=llm.model,
+        )
     return verdicts
 
 
@@ -219,6 +279,7 @@ def run_backend_tests(
     backend_url: str,
     backend_code: str,
     test_cases: list[dict],
+    trace: JudgeTrace | None = None,
 ) -> list[BackendTestScore]:
     """Full runtime backend test flow: generate specs → execute → evaluate."""
     if not test_cases:
@@ -227,7 +288,7 @@ def run_backend_tests(
     # Step 1: LLM generates request specs
     print(f"[runtime]   Generating {len(test_cases)} backend HTTP request specs ...")
     try:
-        specs = _generate_request_specs(llm, backend_code, test_cases)
+        specs = _generate_request_specs(llm, backend_code, test_cases, trace=trace)
     except Exception as exc:
         logger.warning("Failed to generate request specs: %s", exc)
         return [
@@ -246,13 +307,13 @@ def run_backend_tests(
 
     # Step 2: Execute HTTP requests
     print(f"[runtime]   Executing {len(specs)} HTTP requests against {backend_url} ...")
-    responses = _execute_requests(backend_url, specs)
+    responses = _execute_requests(backend_url, specs, trace=trace)
 
     # Step 3: LLM evaluates responses
     time.sleep(_RATE_DELAY)
     print("[runtime]   Evaluating responses ...")
     try:
-        verdicts = _evaluate_responses(llm, test_cases, specs, responses)
+        verdicts = _evaluate_responses(llm, test_cases, specs, responses, trace=trace)
     except Exception as exc:
         logger.warning("Failed to evaluate responses: %s", exc)
         verdicts = []
@@ -338,6 +399,7 @@ def run_database_tests(
     task_instruction: str,
     data_structures: list[str],
     migration_sql: str,
+    trace: JudgeTrace | None = None,
 ) -> list[DatabaseTestScore]:
     """Check database schema by opening the actual SQLite file.
 
@@ -386,12 +448,35 @@ def run_database_tests(
 
     print(f"[runtime]   Evaluating {len(data_structures)} data structures ...")
     try:
+        t0 = time.monotonic()
         raw = llm.generate(user, system=system, temperature=0.1)
+        latency = time.monotonic() - t0
         verdicts = _parse_json(raw)
         if not isinstance(verdicts, list):
+            if trace:
+                trace.add_llm_call(
+                    "database_evaluate",
+                    system_prompt=system, user_prompt=user,
+                    raw_response=raw, parsed_result=verdicts,
+                    error="Response was not a list",
+                    latency_seconds=latency, model=llm.model,
+                )
             verdicts = []
+        elif trace:
+            trace.add_llm_call(
+                "database_evaluate",
+                system_prompt=system, user_prompt=user,
+                raw_response=raw, parsed_result=verdicts,
+                latency_seconds=latency, model=llm.model,
+            )
     except Exception as exc:
         logger.warning("Database evaluation failed: %s", exc)
+        if trace:
+            trace.add_llm_call(
+                "database_evaluate",
+                system_prompt=system, user_prompt=user,
+                error=str(exc), model=llm.model,
+            )
         verdicts = []
 
     scores: list[DatabaseTestScore] = []
@@ -421,6 +506,7 @@ def run_frontend_tests(
     task_instruction: str,
     frontend_code: str,
     ui_test_cases: list[dict],
+    trace: JudgeTrace | None = None,
 ) -> list[FrontendTestScore]:
     """Evaluate frontend test cases.
 
@@ -494,15 +580,38 @@ def run_frontend_tests(
 
     print(f"[runtime]   Evaluating {len(ui_test_cases)} frontend test cases ...")
     try:
+        t0 = time.monotonic()
         if screenshot_b64:
             raw = llm.generate_with_images(user, [screenshot_b64], system=system, temperature=0.1)
         else:
             raw = llm.generate(user, system=system, temperature=0.1)
+        latency = time.monotonic() - t0
         verdicts = _parse_json(raw)
         if not isinstance(verdicts, list):
+            if trace:
+                trace.add_llm_call(
+                    "frontend_evaluate",
+                    system_prompt=system, user_prompt=user,
+                    raw_response=raw, parsed_result=verdicts,
+                    error="Response was not a list",
+                    latency_seconds=latency, model=llm.model,
+                )
             verdicts = []
+        elif trace:
+            trace.add_llm_call(
+                "frontend_evaluate",
+                system_prompt=system, user_prompt=user,
+                raw_response=raw, parsed_result=verdicts,
+                latency_seconds=latency, model=llm.model,
+            )
     except Exception as exc:
         logger.warning("Frontend evaluation failed: %s", exc)
+        if trace:
+            trace.add_llm_call(
+                "frontend_evaluate",
+                system_prompt=system, user_prompt=user,
+                error=str(exc), model=llm.model,
+            )
         verdicts = []
 
     scores: list[FrontendTestScore] = []
@@ -534,6 +643,7 @@ def run_appearance_test(
     frontend_code: str,
     frontend_healthy: bool,
     frontend_url: str | None = None,
+    trace: JudgeTrace | None = None,
 ) -> AppearanceScore:
     """Evaluate visual appearance via a screenshot (preferred) or code analysis.
 
@@ -598,16 +708,25 @@ def run_appearance_test(
 
     print("[runtime]   Evaluating appearance ...")
     try:
+        t0 = time.monotonic()
         if screenshot_b64:
             raw = llm.generate_with_images(user, [screenshot_b64], system=system, temperature=0.1)
         else:
             raw = llm.generate(user, system=system, temperature=0.1)
+        latency = time.monotonic() - t0
         data = _parse_json(raw)
         layout = _clamp(data.get("layout", 1))
         color = _clamp(data.get("color", 1))
         typography = _clamp(data.get("typography", 1))
         polish = _clamp(data.get("component_polish", 1))
         overall = round((layout + color + typography + polish) / 4, 2)
+        if trace:
+            trace.add_llm_call(
+                "appearance",
+                system_prompt=system, user_prompt=user,
+                raw_response=raw, parsed_result=data,
+                latency_seconds=latency, model=llm.model,
+            )
         return AppearanceScore(
             layout=layout,
             color=color,
@@ -618,6 +737,12 @@ def run_appearance_test(
         )
     except Exception as exc:
         logger.warning("Appearance scoring failed: %s", exc)
+        if trace:
+            trace.add_llm_call(
+                "appearance",
+                system_prompt=system, user_prompt=user,
+                error=str(exc), model=llm.model,
+            )
         return AppearanceScore(
             layout=1, color=1, typography=1, component_polish=1,
             overall=1.0, reasoning=f"Judge error: {exc}",
@@ -648,6 +773,7 @@ def evaluate_application_runtime(
     ui_test_cases: list[dict],
     backend_test_cases: list[dict],
     data_structures: list[str],
+    trace: JudgeTrace | None = None,
 ) -> JudgeResult:
     """Run the full runtime evaluation for one generated application.
 
@@ -666,6 +792,7 @@ def evaluate_application_runtime(
     if instance.backend_healthy and backend_test_cases:
         result.backend_tests = run_backend_tests(
             llm, instance.backend_url, backend_code, backend_test_cases,
+            trace=trace,
         )
     elif backend_test_cases:
         result.backend_tests = [
@@ -684,7 +811,7 @@ def evaluate_application_runtime(
     if data_structures:
         result.database_tests = run_database_tests(
             llm, instance.project_dir, task_instruction,
-            data_structures, migration_sql,
+            data_structures, migration_sql, trace=trace,
         )
 
     time.sleep(_RATE_DELAY)
@@ -693,7 +820,7 @@ def evaluate_application_runtime(
     if ui_test_cases:
         result.frontend_tests = run_frontend_tests(
             llm, instance.frontend_url, instance.frontend_healthy,
-            task_instruction, frontend_code, ui_test_cases,
+            task_instruction, frontend_code, ui_test_cases, trace=trace,
         )
 
     time.sleep(_RATE_DELAY)
@@ -702,7 +829,7 @@ def evaluate_application_runtime(
     if frontend_code.strip():
         result.appearance = run_appearance_test(
             llm, task_instruction, frontend_code, instance.frontend_healthy,
-            frontend_url=instance.frontend_url,
+            frontend_url=instance.frontend_url, trace=trace,
         )
 
     result.compute_aggregates()

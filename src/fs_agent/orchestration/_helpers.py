@@ -181,6 +181,14 @@ def run_validation_loop(
             logger.info("✓ Validation passed on iteration %d", iteration)
             return reports
 
+        # Log each error for diagnostics
+        for issue in result.issues:
+            if issue.severity == "error":
+                loc = f" ({issue.file})" if issue.file else ""
+                logger.info(
+                    "  ✗ [%s]%s: %s", issue.component, loc, issue.message
+                )
+
         # Determine which agents need to re-run
         failed_components = {
             issue.component

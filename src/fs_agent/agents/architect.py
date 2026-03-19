@@ -57,19 +57,39 @@ class ArchitectAgent(BaseAgent):
         self.logger.info(summary)
         return result
 
-    def _build_spec(self, context: RunContext) -> ProjectSpec:
-        try:
-            return self._spec_from_llm(context)
-        except Exception as exc:  # pragma: no cover - LLM dependent
-            self.logger.warning("LLM spec generation failed: %s", exc)
-            raise RuntimeError("Failed to generate project specification") from exc
+    _MAX_SPEC_RETRIES = 3
 
-    def _spec_from_llm(self, context: RunContext) -> ProjectSpec:
-        raw_json = self._generate_spec_json(context)
+    def _build_spec(self, context: RunContext) -> ProjectSpec:
+        last_error: Exception | None = None
+        for attempt in range(1, self._MAX_SPEC_RETRIES + 1):
+            try:
+                return self._spec_from_llm(context, attempt=attempt, last_error=last_error)
+            except Exception as exc:
+                last_error = exc
+                self.logger.warning(
+                    "LLM spec generation failed (attempt %d/%d): %s",
+                    attempt, self._MAX_SPEC_RETRIES, exc,
+                )
+        raise RuntimeError("Failed to generate project specification") from last_error
+
+    def _spec_from_llm(
+        self,
+        context: RunContext,
+        *,
+        attempt: int = 1,
+        last_error: Exception | None = None,
+    ) -> ProjectSpec:
+        raw_json = self._generate_spec_json(context, attempt=attempt, last_error=last_error)
         data = self._parse_json(raw_json)
         return ProjectSpec.model_validate(data)
 
-    def _generate_spec_json(self, context: RunContext) -> str:
+    def _generate_spec_json(
+        self,
+        context: RunContext,
+        *,
+        attempt: int = 1,
+        last_error: Exception | None = None,
+    ) -> str:
         request = context.user_request.strip() or "Full-stack application"
         schema = ProjectSpec.prompt_schema()
         system = (
@@ -101,6 +121,12 @@ class ArchitectAgent(BaseAgent):
             "description, and runtime (docker|serverless|kubernetes).\n"
             "- Include at least two infra targets (dev and prod), both using 'docker' runtime.\n"
         )
+        if attempt > 1 and last_error:
+            prompt += (
+                f"\n\nIMPORTANT: Your previous response had a JSON error:\n"
+                f"  {last_error}\n"
+                "Please fix this and return ONLY valid, parseable JSON.\n"
+            )
         # Allow a dedicated provider/model for the architect via
         # FS_AGENT_LLM_PROVIDER_ARCHITECT / FS_AGENT_LLM_MODEL_ARCHITECT.
         response = context.get_llm("architect").generate(
@@ -114,13 +140,51 @@ class ArchitectAgent(BaseAgent):
         cleaned = self._strip_code_fences(text).strip()
         if not cleaned:
             raise ValueError("Architect LLM returned empty response")
+        # First try parsing as-is
         try:
             data = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Architect LLM returned invalid JSON: {exc}") from exc
+        except json.JSONDecodeError:
+            # Try extracting the outermost JSON object from the response
+            data = self._extract_json_object(cleaned)
         if not isinstance(data, dict):
             raise ValueError("Architect LLM response was not a JSON object")
         return data
+
+    def _extract_json_object(self, text: str) -> dict[str, Any]:
+        """Find and parse the outermost {...} JSON object in a text blob."""
+        start = text.find("{")
+        if start == -1:
+            raise ValueError("Architect LLM returned no JSON object")
+        # Walk forward to find the matching closing brace
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                if in_string:
+                    escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start : i + 1])
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(
+                            f"Architect LLM returned invalid JSON: {exc}"
+                        ) from exc
+        raise ValueError("Architect LLM returned unterminated JSON object")
 
     def _strip_code_fences(self, text: str) -> str:
         stripped = text.strip()

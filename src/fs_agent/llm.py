@@ -101,7 +101,7 @@ class DummyLLMClient(BaseLLMClient):
 
 # Well-known base URLs for OpenAI-compatible providers.
 OPENAI_BASE_URL = "https://api.openai.com/v1"
-DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+DASHSCOPE_BASE_URL = "https://coding-intl.dashscope.aliyuncs.com/v1"
 
 
 class OpenAILLMClient(BaseLLMClient):
@@ -229,7 +229,7 @@ def build_llm_client(
     Supported providers:
     - ``openai``  – targets *base_url* (default ``https://api.openai.com/v1``).
     - ``qwen``    – targets Alibaba DashScope International's OpenAI-compatible
-                    gateway (``https://dashscope-intl.aliyuncs.com/compatible-mode/v1``).
+                    gateway (``https://coding-intl.dashscope.aliyuncs.com/v1``).
     - ``dummy``   – deterministic placeholder (no network calls).
 
     An explicit *base_url* always takes precedence over the provider default.

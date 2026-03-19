@@ -22,4 +22,4 @@ ruff_cache/
 # Project artifacts
 artifacts/
 
-.zip
+*.zip

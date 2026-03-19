@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +23,8 @@ from ..benchmark import load_tasks
 from ..llm import BaseLLMClient, OpenAILLMClient, OPENAI_BASE_URL
 from ..logger import get_logger
 from .executor import find_project_dir, start_project, stop_project
-from .models import JudgeResult, TaskJudgeResult
+from .fixes import generate_fix_attempts
+from .models import JudgeResult, JudgeTrace, TaskJudgeResult
 from .runtime import evaluate_application_runtime
 from .scoring import evaluate_application
 
@@ -250,6 +253,14 @@ def run_judge(
                 all_results.append(result)
                 continue
 
+            # Create trace for this evaluation
+            trace = JudgeTrace(
+                task_id=task_id,
+                pattern=pattern,
+                mode=mode,
+                started_at=datetime.now(timezone.utc).isoformat(),
+            )
+
             try:
                 # Snapshot token counters before evaluation
                 _before = judge_llm.usage_stats
@@ -259,6 +270,7 @@ def run_judge(
                         judge_llm, artifact_root, task_id, pattern,
                         difficulty, instruction, code,
                         ui_tests, backend_tests, data_structures,
+                        trace=trace,
                     )
                 else:
                     result = evaluate_application(
@@ -273,6 +285,7 @@ def run_judge(
                         ui_test_cases=ui_tests,
                         backend_test_cases=backend_tests,
                         data_structures=data_structures,
+                        trace=trace,
                     )
 
                 # Record delta tokens consumed by this evaluation
@@ -280,6 +293,18 @@ def run_judge(
                 result.prompt_tokens = _after["prompt_tokens"] - _before["prompt_tokens"]
                 result.completion_tokens = _after["completion_tokens"] - _before["completion_tokens"]
                 result.total_tokens = _after["total_tokens"] - _before["total_tokens"]
+
+                # --- Fix attempts (post-scoring, scores are already frozen) ---
+                time.sleep(5)
+                result.fix_attempts = generate_fix_attempts(
+                    llm=judge_llm,
+                    result=result,
+                    frontend_code=code["frontend_code"],
+                    backend_code=code["backend_code"],
+                    migration_sql=code["migration_sql"],
+                    task_instruction=instruction,
+                    trace=trace,
+                )
             except Exception as exc:
                 logger.exception(
                     "✗ JUDGE FAILED  task=%s  pattern=%s", task_id, pattern
@@ -293,9 +318,14 @@ def run_judge(
                     error=f"{type(exc).__name__}: {exc}",
                 )
 
+            # Finalize and write trace
+            trace.finished_at = datetime.now(timezone.utc).isoformat()
+            _write_trace(trace, artifact_root / task_id / pattern)
+
             all_results.append(result)
+            n_fixes = len(result.fix_attempts)
             logger.info(
-                "■ JUDGE  task=%s  pattern=%s  fe=%.2f  be=%.2f  db=%.2f  appearance=%.1f  tokens=%d",
+                "■ JUDGE  task=%s  pattern=%s  fe=%.2f  be=%.2f  db=%.2f  appearance=%.1f  tokens=%d  fixes=%d",
                 task_id,
                 pattern,
                 result.frontend_weighted_accuracy,
@@ -303,6 +333,7 @@ def run_judge(
                 result.database_accuracy,
                 result.appearance.overall if result.appearance else 0.0,
                 result.total_tokens,
+                n_fixes,
             )
             print(
                 f"[judge] ■ Done task={task_id}  pattern={pattern}"
@@ -311,6 +342,7 @@ def run_judge(
                 f"  db={result.database_accuracy:.2f}"
                 f"  appearance={result.appearance.overall if result.appearance else 0.0:.1f}"
                 f"  tokens={result.total_tokens}"
+                f"  fixes={n_fixes}"
             )
 
     # Write results
@@ -339,6 +371,7 @@ def _evaluate_runtime(
     ui_tests: list[dict],
     backend_tests: list[dict],
     data_structures: list[str],
+    trace: JudgeTrace | None = None,
 ) -> JudgeResult:
     """Boot the project in Docker, run runtime tests, then tear down."""
     project_dir = find_project_dir(artifact_root, task_id, pattern)
@@ -377,6 +410,7 @@ def _evaluate_runtime(
             ui_test_cases=ui_tests,
             backend_test_cases=backend_tests,
             data_structures=data_structures,
+            trace=trace,
         )
     finally:
         stop_project(project_dir)
@@ -392,6 +426,17 @@ def _write_judge_results(results: list[JudgeResult], path: Path) -> None:
     data = [r.model_dump(mode="json") for r in results]
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     logger.info("Wrote judge results → %s", path)
+
+
+def _write_trace(trace: JudgeTrace, run_dir: Path) -> None:
+    """Write the evaluation trace to a JSON file in the run directory."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "judge_trace.json"
+    path.write_text(
+        json.dumps(trace.model_dump(mode="json"), indent=2),
+        encoding="utf-8",
+    )
+    logger.info("Wrote judge trace (%d entries) → %s", len(trace.entries), path)
 
 
 def _write_judge_summary(results: list[JudgeResult], path: Path) -> None:
