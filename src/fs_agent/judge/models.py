@@ -6,6 +6,7 @@ evaluation back to the originating task and its difficulty level.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -92,6 +93,120 @@ class AppearanceScore(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Trace models — capture every LLM / HTTP interaction for investigation
+# ---------------------------------------------------------------------------
+
+
+class LLMCallTrace(BaseModel):
+    """Record of a single LLM interaction during judge evaluation."""
+
+    system_prompt: str = ""
+    user_prompt: str = ""
+    raw_response: str = ""
+    parsed_result: Any = None
+    error: str | None = None
+    latency_seconds: float = 0.0
+    model: str = ""
+
+
+class HTTPRequestTrace(BaseModel):
+    """Record of a single HTTP request made during runtime evaluation."""
+
+    method: str = ""
+    url: str = ""
+    request_body: Any = None
+    status_code: int | None = None
+    response_body: str = ""
+    error: str | None = None
+    latency_seconds: float = 0.0
+
+
+class TraceEntry(BaseModel):
+    """One step in the judge evaluation trace."""
+
+    step: str = Field(description="Identifies the scoring step, e.g. 'frontend_test_0'")
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    llm_call: LLMCallTrace | None = None
+    http_request: HTTPRequestTrace | None = None
+
+
+class JudgeTrace(BaseModel):
+    """Complete trace of all interactions for one (task × pattern) evaluation."""
+
+    task_id: str = ""
+    pattern: str = ""
+    mode: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    entries: list[TraceEntry] = Field(default_factory=list)
+
+    def add_llm_call(
+        self,
+        step: str,
+        *,
+        system_prompt: str = "",
+        user_prompt: str = "",
+        raw_response: str = "",
+        parsed_result: Any = None,
+        error: str | None = None,
+        latency_seconds: float = 0.0,
+        model: str = "",
+    ) -> None:
+        self.entries.append(TraceEntry(
+            step=step,
+            llm_call=LLMCallTrace(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                raw_response=raw_response,
+                parsed_result=parsed_result,
+                error=error,
+                latency_seconds=latency_seconds,
+                model=model,
+            ),
+        ))
+
+    def add_http_request(
+        self,
+        step: str,
+        *,
+        method: str = "",
+        url: str = "",
+        request_body: Any = None,
+        status_code: int | None = None,
+        response_body: str = "",
+        error: str | None = None,
+        latency_seconds: float = 0.0,
+    ) -> None:
+        self.entries.append(TraceEntry(
+            step=step,
+            http_request=HTTPRequestTrace(
+                method=method,
+                url=url,
+                request_body=request_body,
+                status_code=status_code,
+                response_body=response_body,
+                error=error,
+                latency_seconds=latency_seconds,
+            ),
+        ))
+
+
+# ---------------------------------------------------------------------------
+# Fix-attempt models — post-scoring remediation suggestions
+# ---------------------------------------------------------------------------
+
+
+class FixAttempt(BaseModel):
+    """A suggested fix for a failed test case, generated after scoring."""
+
+    dimension: str = Field(description="frontend | backend | database | appearance")
+    test_case: str = Field(description="The test case or data structure that failed")
+    issue_summary: str = Field(description="What went wrong")
+    suggested_fix: str = Field(description="What should be changed")
+    code_patch: str = Field(default="", description="Suggested code diff or snippet")
+
+
+# ---------------------------------------------------------------------------
 # Aggregate result for a single (task × pattern) evaluation
 # ---------------------------------------------------------------------------
 
@@ -142,6 +257,9 @@ class JudgeResult(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+
+    # --- Fix attempts (post-scoring, do not affect scores) ---
+    fix_attempts: list[FixAttempt] = Field(default_factory=list)
 
     def compute_aggregates(self) -> None:
         """Recompute aggregate counts and accuracy from individual scores."""
