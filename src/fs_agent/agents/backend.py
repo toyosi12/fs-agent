@@ -259,6 +259,10 @@ class BackendAgent(BaseAgent):
             " + JavaScript project. Always include package.json, src/app.js,"
             " src/server.js, src/routes/index.js, src/routes/generated.js, and a Dockerfile."
             " Do NOT include tsconfig.json or any TypeScript files."
+            " Dockerfiles MUST use `npm install`, never `npm ci` (no lockfile is generated)."
+            " The Dockerfile MUST be a production build: FROM node:20-alpine,"
+            " WORKDIR /app, npm install --omit=dev, EXPOSE 4000,"
+            " CMD [\"node\", \"src/server.js\"]. Do NOT use npm run dev or nodemon."
         )
         if migration_files:
             system += (
@@ -722,7 +726,7 @@ class BackendAgent(BaseAgent):
             "FROM node:20-alpine\n\n"
             "WORKDIR /app\n\n"
             "COPY package*.json ./\n"
-            "RUN npm ci --omit=dev\n\n"
+            "RUN npm install --omit=dev\n\n"
             "COPY . .\n\n"
             "# Create data directory for SQLite\n"
             "RUN mkdir -p /app/data\n\n"

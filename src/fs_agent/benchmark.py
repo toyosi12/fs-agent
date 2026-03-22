@@ -384,6 +384,10 @@ def run_benchmark(
 
     all_metrics: list[RunMetrics] = []
 
+    # Write results incrementally so progress survives interruptions.
+    results_dir = artifact_root / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     for task_idx, task in enumerate(tasks, 1):
         for pat_idx, pattern in enumerate(patterns, 1):
             logger.info(
@@ -401,9 +405,11 @@ def run_benchmark(
             )
             all_metrics.append(metrics)
 
-    # Write results
-    results_dir = artifact_root / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
+            # Save after every run so partial results are never lost.
+            _write_json_report(all_metrics, results_dir / "benchmark_results.json")
+            _write_csv_report(all_metrics, results_dir / "benchmark_results.csv")
+
+    # Final summary (requires all runs).
     _write_json_report(all_metrics, results_dir / "benchmark_results.json")
     _write_csv_report(all_metrics, results_dir / "benchmark_results.csv")
     _write_summary(all_metrics, results_dir / "benchmark_summary.json")
