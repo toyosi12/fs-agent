@@ -21,7 +21,8 @@ def run(
     request: str = typer.Argument(..., help="Natural language description of the desired app"),
     artifact_dir: Path | None = typer.Option(None, help="Directory to store generated artifacts"),
     dry_run: bool = typer.Option(False, help="Skip shell-side effects and focus on planning"),
-    pattern: str = typer.Option("sequential", help="Orchestration pattern: sequential or centralized"),
+    pattern: str = typer.Option("sequential", help="Orchestration pattern: sequential, centralized, decentralized, hierarchical, or parallel"),
+    max_validation_retries: int = typer.Option(3, "--max-retries", help="Maximum validation-retry iterations (0 to disable)"),
 ) -> None:
     """Execute the orchestrator against a project spec."""
 
@@ -31,6 +32,7 @@ def run(
             artifact_dir=artifact_dir,
             dry_run=dry_run,
             orchestration_pattern=pattern,
+            max_validation_retries=max_validation_retries,
         )
     )
     _print_summary(reports)
@@ -39,11 +41,11 @@ def run(
 @app.command()
 def benchmark(
     dataset: Path = typer.Argument(
-        ..., help="Path to the tasks JSON file (e.g. dataset/tasks.json)"
+        ..., help="Path to the tasks JSON file (e.g. dataset/tasks_with_difficulty.json)"
     ),
     patterns: Optional[str] = typer.Option(
         None,
-        help="Comma-separated list of patterns to benchmark (default: all six)",
+        help="Comma-separated list of patterns to benchmark (default: all five)",
     ),
     task_ids: Optional[str] = typer.Option(
         None,
@@ -52,6 +54,11 @@ def benchmark(
     max_tasks: Optional[int] = typer.Option(
         None,
         help="Maximum number of tasks to process (useful for quick tests)",
+    ),
+    max_validation_retries: int = typer.Option(
+        3,
+        "--max-retries",
+        help="Maximum validation-retry iterations per pattern run (0 to disable)",
     ),
     artifact_root: Path = typer.Option(
         Path("artifacts") / "benchmark",
@@ -71,6 +78,7 @@ def benchmark(
         task_ids=id_list,
         max_tasks=max_tasks,
         artifact_root=artifact_root,
+        max_validation_retries=max_validation_retries,
     )
 
     # Print a rich summary table
@@ -100,6 +108,105 @@ def benchmark(
     console.print(table)
     console.print(
         f"\n[bold green]Results written to:[/bold green] {artifact_root / 'results'}"
+    )
+
+
+@app.command()
+def judge(
+    dataset: Path = typer.Argument(
+        ..., help="Path to the tasks JSON file (e.g. dataset/tasks_with_difficulty.json)"
+    ),
+    artifact_root: Path = typer.Option(
+        Path("artifacts") / "benchmark",
+        help="Root directory containing benchmark outputs to evaluate",
+    ),
+    patterns: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated list of patterns to evaluate (default: all found)",
+    ),
+    task_ids: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated list of task IDs to evaluate (default: all)",
+    ),
+    max_tasks: Optional[int] = typer.Option(
+        None,
+        help="Maximum number of tasks to evaluate",
+    ),
+    mode: str = typer.Option(
+        "static",
+        help="Evaluation mode: 'static' (code review only) or 'runtime' (boot in Docker, send real HTTP requests)",
+    ),
+) -> None:
+    """Score generated applications using the LLM-as-a-judge (GPT-4o).
+
+    Reads generated code from benchmark artifacts and evaluates:
+    - Frontend functional tests (YES / PARTIAL / NO)
+    - Backend API tests (YES / NO)
+    - Database schema tests (YES / NO)
+    - Appearance score (1-5 on four criteria)
+
+    Two modes:
+    - **static** (default): reviews generated source code only.
+    - **runtime**: boots projects in Docker, sends real HTTP requests,
+      checks the SQLite database, then evaluates responses.
+
+    Requires FS_AGENT_JUDGE_API_KEY to be set (OpenAI API key).
+    Runtime mode also requires Docker to be installed and running.
+    Results are written to <artifact-root>/results/judge_results.json
+    and judge_summary.json, tracked by task ID and difficulty level.
+    """
+
+    from .judge import run_judge
+
+    pat_list = [p.strip() for p in patterns.split(",")] if patterns else None
+    id_list = [i.strip() for i in task_ids.split(",")] if task_ids else None
+
+    results = run_judge(
+        dataset_path=dataset,
+        artifact_root=artifact_root,
+        patterns=pat_list,
+        task_ids=id_list,
+        max_tasks=max_tasks,
+        mode=mode,
+    )
+
+    # Print a rich summary table
+    table = Table(title="Judge Results", show_lines=True)
+    table.add_column("Task ID", style="cyan", no_wrap=True)
+    table.add_column("Pattern", style="magenta")
+    table.add_column("Difficulty", style="yellow")
+    table.add_column("Frontend", justify="right")
+    table.add_column("Backend", justify="right")
+    table.add_column("Database", justify="right")
+    table.add_column("Appearance", justify="right")
+    table.add_column("Tokens", justify="right")
+    table.add_column("Error", style="red")
+
+    total_tokens_all = 0
+    for r in results:
+        fe_str = f"{r.frontend_weighted_accuracy:.2f}" if r.frontend_total > 0 else "-"
+        be_str = f"{r.backend_accuracy:.2f}" if r.backend_total > 0 else "-"
+        db_str = f"{r.database_accuracy:.2f}" if r.database_total > 0 else "-"
+        ap_str = f"{r.appearance.overall:.1f}" if r.appearance else "-"
+        tok_str = f"{r.total_tokens:,}" if r.total_tokens else "-"
+        err_str = r.error[:40] if r.error else ""
+        total_tokens_all += r.total_tokens
+        table.add_row(
+            r.task_id,
+            r.pattern,
+            r.difficulty,
+            fe_str,
+            be_str,
+            db_str,
+            ap_str,
+            tok_str,
+            err_str,
+        )
+
+    console.print(table)
+    console.print(f"\n[bold]Total tokens consumed:[/bold] {total_tokens_all:,}")
+    console.print(
+        f"[bold green]Judge results written to:[/bold green] {artifact_root / 'results'}"
     )
 
 

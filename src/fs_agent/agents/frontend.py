@@ -126,7 +126,14 @@ class FrontendAgent(BaseAgent):
     ) -> str:
         metadata = context.require_spec().metadata
         route_lines = [f"- {route['path']}: components {', '.join(route['components']) or 'N/A'}" for route in routes]
-        api_lines = [f"- {endpoint['method']} {endpoint['path']}" for endpoint in backend_blueprint.get("endpoints", [])]
+        api_lines = []
+        for ep in backend_blueprint.get("endpoints", []):
+            line = f"- {ep['method']} {ep['path']}"
+            if ep.get("request_schema"):
+                line += f"\n  Request: {json.dumps(ep['request_schema'])}"
+            if ep.get("response_schema"):
+                line += f"\n  Response: {json.dumps(ep['response_schema'])}"
+            api_lines.append(line)
         prompt = (
             f"Project: {metadata.name}\n"
             f"Summary: {metadata.summary}\n\n"
@@ -139,6 +146,9 @@ class FrontendAgent(BaseAgent):
             + "\nAPIs:\n"
             + ("\n".join(api_lines) if api_lines else "(no APIs provided)")
             + "\n\nDo NOT use TypeScript. Do NOT leave TODO comments or placeholder stubs."
+            "\nDo NOT create mock data or fake API responses. All data must come from "
+            "real fetch() calls to the backend API endpoints listed above. "
+            "Match the exact response schema for each endpoint."
             "\n\nAlso generate a companion test file using Vitest and React Testing Library. "
             "The tests should:\n"
             "- Import components and render them with @testing-library/react\n"
@@ -234,7 +244,15 @@ class FrontendAgent(BaseAgent):
         system = (
             "You are a senior frontend engineer. Produce a JSON plan for the file-system MCP"
             " server that scaffolds a React + Vite + JavaScript project using Tailwind-ready"
-            " components. Do NOT include tsconfig.json or any TypeScript files."
+            " components. Always include a Dockerfile for the frontend."
+            " Do NOT include tsconfig.json or any TypeScript files."
+            " Dockerfiles MUST use `npm install`, never `npm ci` (no lockfile is generated)."
+            " The Dockerfile MUST be a multi-stage production build:"
+            " Stage 1 ('build'): FROM node:20-alpine, npm install, npm run build."
+            " Stage 2: FROM nginx:alpine, copy dist to /usr/share/nginx/html,"
+            " write an nginx config that serves the SPA (try_files $uri /index.html)"
+            " and proxies /api/ requests to http://backend:4000."
+            " EXPOSE 80. Do NOT use npm run dev or vite dev server in the Dockerfile."
         )
         prompt = (
             f"User request: {context.user_request}\n"
@@ -358,6 +376,10 @@ class FrontendAgent(BaseAgent):
                 "description": "Vitest + React Testing Library component tests",
                 "body": self._render_fallback_tests(routes),
             },
+            "Dockerfile": {
+                "description": "Docker image for the frontend service",
+                "body": self._render_dockerfile(),
+            },
         }
 
     def _render_readme(
@@ -418,6 +440,33 @@ class FrontendAgent(BaseAgent):
             },
         }
         return json.dumps(package, indent=2)
+
+    def _render_dockerfile(self) -> str:
+        return (
+            "FROM node:20-alpine AS build\n\n"
+            "WORKDIR /app\n\n"
+            "COPY package*.json ./\n"
+            "RUN npm install\n\n"
+            "COPY . .\n"
+            "RUN npm run build\n\n"
+            "FROM nginx:alpine\n"
+            "COPY --from=build /app/dist /usr/share/nginx/html\n"
+            "# Nginx config that proxies /api to the backend service\n"
+            "RUN printf 'server {\\n"
+            "  listen 80;\\n"
+            "  location / {\\n"
+            "    root /usr/share/nginx/html;\\n"
+            "    try_files $uri $uri/ /index.html;\\n"
+            "  }\\n"
+            "  location /api/ {\\n"
+            "    proxy_pass http://backend:4000;\\n"
+            "    proxy_set_header Host $host;\\n"
+            "    proxy_set_header X-Real-IP $remote_addr;\\n"
+            "  }\\n"
+            "}\\n' > /etc/nginx/conf.d/default.conf\n"
+            "EXPOSE 80\n"
+            "CMD [\"nginx\", \"-g\", \"daemon off;\"]\n"
+        )
 
     def _render_vite_config(self) -> str:
         return (

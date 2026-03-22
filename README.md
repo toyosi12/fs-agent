@@ -19,7 +19,7 @@ Python-based multi-agent orchestrator that drafts full-stack JavaScript applicat
 7. **Benchmark Runner** – Reads tasks from a dataset, runs every pattern, and produces metrics reports.
 
 ## Orchestration Patterns
-Six patterns are available, selectable via the `--pattern` flag:
+Five patterns are available, selectable via the `--pattern` flag:
 
 | Pattern | Description |
 |---|---|
@@ -28,7 +28,16 @@ Six patterns are available, selectable via the `--pattern` flag:
 | `decentralized` | Each agent decides who should handle the work next (handoff routing) |
 | `hierarchical` | Two-level supervisor tree — root picks a phase, phase supervisor picks an agent |
 | `parallel` | Fan-out/fan-in — independent agents run concurrently via ThreadPoolExecutor |
-| `iterative` | Critic-driven retry loop — an LLM critic scores each agent's output and triggers retries |
+
+### Post-Generation Validation
+Each pattern runs a validation loop after agents complete. The loop checks:
+- Required files exist (package.json, entry points, Dockerfiles)
+- No LLM markdown fences left in source files
+- Frontend ↔ Backend API wiring (port consistency, proxy setup)
+- Database config sync (better-sqlite3 dependency, DB_PATH consistency)
+- Dockerfile build feasibility (devDeps available for build step)
+
+If validation fails, the responsible agents are re-run with error feedback. Retries are configurable via `--max-retries` (default: 3, set to 0 to disable).
 
 ## Setup
 
@@ -90,21 +99,21 @@ artifacts/projects/collaborative-task-manager/
 
 ## Running the Benchmark
 
-The benchmark runner reads tasks from `dataset/tasks.json`, executes each task through every orchestration pattern, and records detailed metrics.
+The benchmark runner reads tasks from `dataset/tasks_with_difficulty.json`, executes each task through every orchestration pattern, and records detailed metrics.
 
 ### Quick start
 ```bash
 # Run all 100 tasks × all 6 patterns (600 runs total)
-fs-agent benchmark dataset/tasks.json
+fs-agent benchmark dataset/tasks_with_difficulty.json
 
 # Run a quick test with just 1 task and 2 patterns
-fs-agent benchmark dataset/tasks.json --max-tasks 1 --patterns sequential,parallel
+fs-agent benchmark dataset/tasks_with_difficulty.json --max-tasks 1 --patterns sequential,parallel
 
 # Run specific task IDs only
-fs-agent benchmark dataset/tasks.json --task-ids 000001,000005,000010
+fs-agent benchmark dataset/tasks_with_difficulty.json --task-ids 000001,000005,000010
 
 # Custom output directory
-fs-agent benchmark dataset/tasks.json --artifact-root artifacts/my_benchmark
+fs-agent benchmark dataset/tasks_with_difficulty.json --artifact-root artifacts/my_benchmark
 ```
 
 ### Benchmark CLI options
@@ -126,8 +135,7 @@ artifacts/benchmark/
 │   ├── centralized/
 │   ├── decentralized/
 │   ├── hierarchical/
-│   ├── parallel/
-│   └── iterative/
+│   └── parallel/
 ├── 000002/
 │   └── …
 └── results/

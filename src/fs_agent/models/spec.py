@@ -7,7 +7,7 @@ import logging
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +63,37 @@ class Migration(BaseModel):
 
 
 class DatabaseSpec(BaseModel):
-    provider: Literal["postgres", "mysql", "sqlite", "mongodb"] = "mysql"
+    provider: Literal["postgres", "mysql", "sqlite", "mongodb"] = "sqlite"
     models: list[DataModel] = Field(default_factory=list)
     migrations: list[Migration] = Field(default_factory=list)
+
+    @field_validator("models", mode="before")
+    @classmethod
+    def _coerce_models(cls, v: Any) -> list[Any]:
+        """Accept plain strings (e.g. 'Stock') and wrap them as DataModel dicts."""
+        if not isinstance(v, list):
+            return v
+        out: list[Any] = []
+        for item in v:
+            if isinstance(item, str):
+                out.append({"name": item})
+            else:
+                out.append(item)
+        return out
+
+    @field_validator("migrations", mode="before")
+    @classmethod
+    def _coerce_migrations(cls, v: Any) -> list[Any]:
+        """Accept plain strings and wrap them as Migration dicts."""
+        if not isinstance(v, list):
+            return v
+        out: list[Any] = []
+        for item in v:
+            if isinstance(item, str):
+                out.append({"name": item})
+            else:
+                out.append(item)
+        return out
 
 
 class BackendSpec(BaseModel):

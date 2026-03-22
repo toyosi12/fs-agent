@@ -110,18 +110,17 @@ Agents are grouped into *stages* that execute in sequence, but agents **within**
 
 There are no LLM coordination calls; stage membership is statically defined. Thread safety is ensured by collecting `AgentReport` objects from futures and calling `context.record()` exclusively on the main thread after all futures in a stage complete. This pattern tests whether concurrency in the build phase yields wall-clock improvements over the sequential baseline.
 
-### 3.6 Iterative Refinement (Critic-Driven Retry Loop)
+### 3.6 Post-Generation Validation Loop
 
-Each agent runs in the canonical order (architect → backend → frontend → infra), but after each execution an LLM *critic* evaluates the output against role-specific quality criteria. The critic scores the output on a 1–10 scale. If the score falls below a pass threshold of 7, the agent is re-run (up to 2 retries, for a maximum of 3 attempts per agent). Critic feedback is stored in the agent report's metadata so it is available in the context on retry.
+All five patterns run a post-generation validation loop after agents complete. The validation module (`src/fs_agent/validation.py`) performs structural and integration checks on the generated project:
 
-The quality criteria are tailored per role:
+- **Structural**: Required files exist (package.json, entry points, Dockerfiles); package.json is valid JSON with required fields
+- **Code quality**: No leftover LLM markdown fences (`````) in source files
+- **Docker**: Dockerfiles don't install only production deps before a build step
+- **Frontend ↔ Backend wiring**: Frontend API calls reference the correct backend port (4000); vite.config.js has no syntax errors
+- **Database sync**: Migrations have a corresponding `db.js`; `better-sqlite3` is in dependencies; `DB_PATH` is consistent between `.env` and `docker-compose.yml`
 
-- **Architect** (5 criteria): spec completeness, frontend–backend cross-references, migration presence, infra targets, no orphaned endpoints.
-- **Backend** (5 criteria): correct dependencies, route handler coverage, database connection, environment documentation, error handling middleware.
-- **Frontend** (5 criteria): correct dependencies, route coverage, API call correctness, theme adherence, navigation implementation.
-- **Infra** (4 criteria): database creation, backend startup, frontend startup, environment file configuration.
-
-The critic uses temperature 0.0 and a structured JSON response format. If the critic LLM call fails, the agent auto-passes (score = 10) to avoid blocking the pipeline.
+If validation fails, the loop identifies the responsible agent(s), injects error feedback into the prompt, and re-runs them. The maximum number of retry iterations is configurable via `--max-retries` (default: 3, env var `FS_AGENT_MAX_VALIDATION_RETRIES`). Set to 0 to disable.
 
 ---
 
@@ -129,7 +128,7 @@ The critic uses temperature 0.0 and a structured JSON response format. If the cr
 
 ### 4.1 Dataset
 
-The benchmark uses a curated dataset of 100 full-stack web application tasks (`dataset/tasks.json`). Each task contains:
+The benchmark uses a curated dataset of 100 full-stack web application tasks (`dataset/tasks_with_difficulty.json`). Each task contains:
 
 - **`id`**: A unique six-digit identifier (e.g., `000001`).
 - **`instruction`**: A natural-language product brief describing the desired application, its features, and UI styling preferences.
@@ -179,7 +178,7 @@ We collect the following metrics for each run:
 
 | Metric | Definition |
 |--------|-----------|
-| **Agent count** ($n$) | Number of agents successfully dispatched during the run. For patterns with retry logic (iterative), this may exceed 4. |
+| **Agent count** ($n$) | Number of agents successfully dispatched during the run. With validation retries, this may exceed 4. |
 | **Coordinator calls** ($C_{\text{coord}}$) | Number of LLM calls specifically for routing/coordination (distinct from agent-internal LLM calls). Derived from `coordinator_calls` and `handoff_calls` metadata recorded by patterns. |
 | **Communication overhead ratio** | Proportion of total tokens consumed by coordination: $\rho = C_{\text{coord}} / C_{\text{llm}}$. |
 
@@ -221,7 +220,7 @@ To ensure fair comparison across patterns, the following variables are held cons
 
 ## 6. Independent and Dependent Variables
 
-**Independent variable**: The orchestration pattern (6 levels: sequential, centralised, decentralised, hierarchical, parallel, iterative).
+**Independent variable**: The orchestration pattern (5 levels: sequential, centralised, decentralised, hierarchical, parallel).
 
 **Dependent variables**:
 - Wall-clock execution time ($T_{\text{wall}}$)

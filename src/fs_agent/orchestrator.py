@@ -9,7 +9,7 @@ from .config import Settings, get_settings
 from .context import AgentReport, RunContext
 from dotenv import load_dotenv
 from .logger import get_logger
-from .orchestration import AgentRegistry, CentralizedOrchestrator, DecentralizedOrchestrator, HierarchicalOrchestrator, IterativeRefinementOrchestrator, ParallelOrchestrator, SequentialOrchestrator, register_default_agents
+from .orchestration import AgentRegistry, CentralizedOrchestrator, DecentralizedOrchestrator, HierarchicalOrchestrator, ParallelOrchestrator, SequentialOrchestrator, register_default_agents
 from .llm import BaseLLMClient, build_llm_clients_from_env
 import os
 
@@ -25,6 +25,7 @@ def _resolve_settings(
     artifact_dir: Path | None,
     dry_run: bool | None,
     orchestration_pattern: str | None = None,
+    max_validation_retries: int | None = None,
 ) -> Settings:
     base = get_settings()
     update: dict[str, object] = {}
@@ -34,6 +35,8 @@ def _resolve_settings(
         update["dry_run"] = dry_run
     if orchestration_pattern is not None:
         update["orchestration_pattern"] = orchestration_pattern
+    if max_validation_retries is not None:
+        update["max_validation_retries"] = max_validation_retries
     if llm_provider is not None:
         update["llm_provider"] = llm_provider
     if llm_model is not None:
@@ -45,7 +48,7 @@ def _resolve_settings(
 
 def _build_pattern(
     settings: Settings, registry: AgentRegistry, llm: BaseLLMClient
-) -> SequentialOrchestrator | CentralizedOrchestrator | DecentralizedOrchestrator | HierarchicalOrchestrator | ParallelOrchestrator | IterativeRefinementOrchestrator:
+) -> SequentialOrchestrator | CentralizedOrchestrator | DecentralizedOrchestrator | HierarchicalOrchestrator | ParallelOrchestrator:
     if settings.orchestration_pattern == "sequential":
         return SequentialOrchestrator(registry=registry)
     if settings.orchestration_pattern == "centralized":
@@ -56,8 +59,6 @@ def _build_pattern(
         return HierarchicalOrchestrator(registry=registry, llm=llm)
     if settings.orchestration_pattern == "parallel":
         return ParallelOrchestrator(registry=registry)
-    if settings.orchestration_pattern == "iterative":
-        return IterativeRefinementOrchestrator(registry=registry, llm=llm)
     raise ValueError(f"Unsupported orchestration pattern: {settings.orchestration_pattern}")
 
 
@@ -67,12 +68,18 @@ def run_orchestration(
     artifact_dir: Path | None = None,
     dry_run: bool | None = None,
     orchestration_pattern: str | None = None,
+    max_validation_retries: int | None = None,
 ) -> Iterable[AgentReport]:
     """Execute the configured orchestration pattern given a natural language brief."""
 
     get_settings.cache_clear()
 
-    settings = _resolve_settings(artifact_dir, dry_run=dry_run, orchestration_pattern=orchestration_pattern)
+    settings = _resolve_settings(
+        artifact_dir,
+        dry_run=dry_run,
+        orchestration_pattern=orchestration_pattern,
+        max_validation_retries=max_validation_retries,
+    )
     logger.info(
         "Starting orchestration pattern=%s request=%s artifact_dir=%s dry_run=%s",
         settings.orchestration_pattern,

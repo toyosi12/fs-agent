@@ -1,6 +1,6 @@
 """Benchmark runner — executes every orchestration pattern against a task dataset.
 
-Reads tasks from ``dataset/tasks.json``, runs each task through every
+Reads tasks from ``dataset/tasks_with_difficulty.json``, runs each task through every
 orchestration pattern, and records rich metrics (token usage, wall-clock
 time, coordination overhead, agent-level timings, etc.).
 
@@ -32,7 +32,6 @@ from .orchestration import (
     CentralizedOrchestrator,
     DecentralizedOrchestrator,
     HierarchicalOrchestrator,
-    IterativeRefinementOrchestrator,
     OrchestrationError,
     ParallelOrchestrator,
     SequentialOrchestrator,
@@ -47,7 +46,6 @@ ALL_PATTERNS: list[str] = [
     "decentralized",
     "hierarchical",
     "parallel",
-    "iterative",
 ]
 
 
@@ -142,8 +140,6 @@ def _build_pattern(
         return HierarchicalOrchestrator(registry=registry, llm=llm)
     if name == "parallel":
         return ParallelOrchestrator(registry=registry)
-    if name == "iterative":
-        return IterativeRefinementOrchestrator(registry=registry, llm=llm)
     raise ValueError(f"Unknown pattern: {name}")
 
 
@@ -324,18 +320,19 @@ def run_single(
 # ---------------------------------------------------------------------------
 
 def load_tasks(dataset_path: Path) -> list[dict[str, Any]]:
-    """Load tasks from the dataset JSON file."""
+    """Load tasks from the dataset JSON file.
+
+    Preserves all task fields (ui_instruct, backend_test_cases,
+    data_structures, difficulty, etc.) for downstream evaluation.
+    """
     raw = json.loads(dataset_path.read_text(encoding="utf-8"))
     rows = raw.get("rows", raw if isinstance(raw, list) else [])
     tasks: list[dict[str, Any]] = []
     for entry in rows:
         row = entry.get("row", entry)
-        tasks.append(
-            {
-                "id": str(row.get("id", row.get("row_idx", len(tasks)))),
-                "instruction": row["instruction"],
-            }
-        )
+        task = dict(row)
+        task["id"] = str(task.get("id", task.get("row_idx", len(tasks))))
+        tasks.append(task)
     return tasks
 
 
@@ -346,22 +343,9 @@ def run_benchmark(
     task_ids: list[str] | None = None,
     max_tasks: int | None = None,
     artifact_root: Path | None = None,
+    max_validation_retries: int | None = None,
 ) -> list[RunMetrics]:
-    """Run the full benchmark and write results to disk.
-
-    Parameters
-    ----------
-    dataset_path:
-        Path to ``dataset/tasks.json``.
-    patterns:
-        Subset of patterns to benchmark (default: all six).
-    task_ids:
-        If given, only run these task IDs.
-    max_tasks:
-        Cap on the number of tasks to process (useful for quick tests).
-    artifact_root:
-        Root directory for benchmark artefacts.  Defaults to ``artifacts/benchmark/``.
-    """
+    """Run the full benchmark and write results to disk."""
 
     from dotenv import load_dotenv
 
@@ -369,6 +353,10 @@ def run_benchmark(
 
     get_settings.cache_clear()
     base_settings = get_settings()
+    if max_validation_retries is not None:
+        base_settings = base_settings.model_copy(
+            update={"max_validation_retries": max_validation_retries}
+        )
 
     patterns = patterns or list(ALL_PATTERNS)
     artifact_root = artifact_root or Path("artifacts") / "benchmark"
@@ -395,6 +383,10 @@ def run_benchmark(
 
     all_metrics: list[RunMetrics] = []
 
+    # Write results incrementally so progress survives interruptions.
+    results_dir = artifact_root / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     for task_idx, task in enumerate(tasks, 1):
         for pat_idx, pattern in enumerate(patterns, 1):
             logger.info(
@@ -412,9 +404,11 @@ def run_benchmark(
             )
             all_metrics.append(metrics)
 
-    # Write results
-    results_dir = artifact_root / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
+            # Save after every run so partial results are never lost.
+            _write_json_report(all_metrics, results_dir / "benchmark_results.json")
+            _write_csv_report(all_metrics, results_dir / "benchmark_results.csv")
+
+    # Final summary (requires all runs).
     _write_json_report(all_metrics, results_dir / "benchmark_results.json")
     _write_csv_report(all_metrics, results_dir / "benchmark_results.csv")
     _write_summary(all_metrics, results_dir / "benchmark_summary.json")
