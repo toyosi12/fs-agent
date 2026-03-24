@@ -152,6 +152,9 @@ class BackendAgent(BaseAgent):
             "with complete, functional route handlers. Every endpoint must be fully "
             "implemented and return meaningful responses. No placeholders, no TODOs, "
             "no TypeScript syntax."
+            " IMPORTANT: Never use the 'bcrypt' package — it requires native compilation "
+            "that fails in Alpine Docker. Use 'bcryptjs' (pure JavaScript) instead. "
+            "Import it as: import bcrypt from 'bcryptjs';"
         )
         if blueprint.get("database"):
             system += (
@@ -261,8 +264,15 @@ class BackendAgent(BaseAgent):
             " Do NOT include tsconfig.json or any TypeScript files."
             " Dockerfiles MUST use `npm install`, never `npm ci` (no lockfile is generated)."
             " The Dockerfile MUST be a production build: FROM node:20-alpine,"
-            " WORKDIR /app, npm install --omit=dev, EXPOSE 4000,"
-            " CMD [\"node\", \"src/server.js\"]. Do NOT use npm run dev or nodemon."
+            " WORKDIR /app, npm install --omit=dev, EXPOSE 4000."
+            " If the project has migrations, the CMD must run them before starting:"
+            ' CMD ["sh", "-c", "node src/migrate.js && node src/server.js"].'
+            " Otherwise: CMD [\"node\", \"src/server.js\"]. Do NOT use npm run dev or nodemon."
+            " CRITICAL: Never use the 'bcrypt' npm package (native compilation fails in Alpine)."
+            " Always use 'bcryptjs' (pure JS drop-in replacement) instead."
+            " Every package imported in source files MUST be listed in package.json dependencies."
+            " The app.js MUST include health check endpoints on both '/' and '/healthz'"
+            " that return JSON {status: 'ok'}."
         )
         if migration_files:
             system += (
@@ -502,6 +512,10 @@ class BackendAgent(BaseAgent):
             "app.use(express.json());\n"
             "app.use(morgan('dev'));\n\n"
             "app.use('/api', apiRouter);\n\n"
+            "// Health check endpoints (root + /healthz)\n"
+            "app.get('/', (_req, res) => {\n"
+            "  return res.json({ status: 'ok', time: new Date().toISOString() });\n"
+            "});\n\n"
             "app.get('/healthz', (_req, res) => {\n"
             "  return res.json({ status: 'ok', time: new Date().toISOString() });\n"
             "});\n\n"
@@ -731,7 +745,8 @@ class BackendAgent(BaseAgent):
             "# Create data directory for SQLite\n"
             "RUN mkdir -p /app/data\n\n"
             "EXPOSE 4000\n\n"
-            "CMD [\"node\", \"src/server.js\"]\n"
+            '# Run migrations then start the server\n'
+            'CMD ["sh", "-c", "node src/migrate.js 2>/dev/null; node src/server.js"]\n'
         )
 
     def _slugify(self, value: str) -> str:

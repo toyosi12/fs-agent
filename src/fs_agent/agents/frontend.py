@@ -165,6 +165,9 @@ class FrontendAgent(BaseAgent):
             "hooks, and real UI markup using Tailwind CSS. Every component must be fully "
             "implemented with working forms, lists, event handlers, and API integration. "
             "No placeholders, no TODOs, no TypeScript syntax."
+            " CRITICAL: Every npm package you import MUST be listed in package.json dependencies. "
+            "For icons, use lucide-react (already included). "
+            "Do NOT import packages that are not in the project's package.json."
         )
         try:
             # Use frontend-specific LLM if configured.
@@ -253,6 +256,9 @@ class FrontendAgent(BaseAgent):
             " write an nginx config that serves the SPA (try_files $uri /index.html)"
             " and proxies /api/ requests to http://backend:4000."
             " EXPOSE 80. Do NOT use npm run dev or vite dev server in the Dockerfile."
+            " CRITICAL: Every npm package imported in source files MUST appear in package.json."
+            " Always include lucide-react in dependencies for icon imports."
+            " Never use 'bcrypt' — use 'bcryptjs' (pure JS) instead."
         )
         prompt = (
             f"User request: {context.user_request}\n"
@@ -426,6 +432,7 @@ class FrontendAgent(BaseAgent):
                 "react": "^18.3.1",
                 "react-dom": "^18.3.1",
                 "react-router-dom": "^6.26.2",
+                "lucide-react": "^0.294.0",
             },
             "devDependencies": {
                 "@vitejs/plugin-react": "^4.3.1",

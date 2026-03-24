@@ -22,13 +22,14 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _BACKEND_DOCKERFILE = """\
-FROM node:20-slim
+FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY . .
+RUN mkdir -p /app/data
 EXPOSE 4000
-CMD ["node", "src/server.js"]
+CMD ["sh", "-c", "node src/migrate.js 2>/dev/null; node src/server.js"]
 """
 
 _BACKEND_DOCKERIGNORE = """\
@@ -116,6 +117,96 @@ def ensure_dockerfiles(project_dir: Path) -> None:
         ignore = frontend_dir / ".dockerignore"
         if not ignore.exists():
             ignore.write_text(_FRONTEND_DOCKERIGNORE)
+
+    # Post-generation fixups on generated code
+    _fixup_project(project_dir)
+
+
+def _fixup_project(project_dir: Path) -> None:
+    """Apply deterministic fixes to common LLM generation mistakes."""
+    import json as _json
+
+    for sub in ("backend", "frontend"):
+        pkg_path = project_dir / sub / "package.json"
+        if not pkg_path.exists():
+            continue
+        try:
+            pkg = _json.loads(pkg_path.read_text())
+        except (ValueError, OSError):
+            continue
+
+        changed = False
+        deps = pkg.get("dependencies", {})
+        dev_deps = pkg.get("devDependencies", {})
+
+        # 1. Replace bcrypt with bcryptjs (native compilation fails in Alpine)
+        for d in (deps, dev_deps):
+            if "bcrypt" in d and "bcryptjs" not in d:
+                d["bcryptjs"] = d.pop("bcrypt")
+                changed = True
+
+        # 2. Ensure lucide-react is present if frontend imports it
+        if sub == "frontend" and "lucide-react" not in deps:
+            src_dir = project_dir / sub / "src"
+            if src_dir.exists():
+                for jsx_file in src_dir.rglob("*.jsx"):
+                    try:
+                        if "lucide-react" in jsx_file.read_text():
+                            deps["lucide-react"] = "^0.294.0"
+                            changed = True
+                            break
+                    except OSError:
+                        continue
+
+        if changed:
+            pkg_path.write_text(_json.dumps(pkg, indent=2) + "\n")
+            logger.info("Fixed package.json in %s/%s", project_dir.name, sub)
+
+    # 3. Replace bcrypt imports in source files
+    for sub in ("backend", "frontend"):
+        src_dir = project_dir / sub / "src"
+        if not src_dir.exists():
+            continue
+        for js_file in src_dir.rglob("*.js"):
+            try:
+                content = js_file.read_text()
+            except OSError:
+                continue
+            # Replace require('bcrypt') and import ... from 'bcrypt'
+            new_content = content.replace("'bcrypt'", "'bcryptjs'").replace('"bcrypt"', '"bcryptjs"')
+            if new_content != content:
+                js_file.write_text(new_content)
+                logger.info("Replaced bcrypt -> bcryptjs in %s", js_file)
+
+    # 4. Ensure backend Dockerfile runs migrations before starting
+    backend_df = project_dir / "backend" / "Dockerfile"
+    if backend_df.exists():
+        try:
+            df_content = backend_df.read_text()
+            # Replace CMD that only starts server with one that runs migrations first
+            if 'CMD ["node", "src/server.js"]' in df_content and "migrate" not in df_content:
+                df_content = df_content.replace(
+                    'CMD ["node", "src/server.js"]',
+                    'CMD ["sh", "-c", "node src/migrate.js 2>/dev/null; node src/server.js"]',
+                )
+                backend_df.write_text(df_content)
+                logger.info("Patched backend Dockerfile to run migrations before start")
+        except OSError:
+            pass
+
+    # 5. Replace npm ci with npm install in Dockerfiles
+    for sub in ("backend", "frontend"):
+        df_path = project_dir / sub / "Dockerfile"
+        if not df_path.exists():
+            continue
+        try:
+            content = df_path.read_text()
+        except OSError:
+            continue
+        new_content = content.replace("npm ci", "npm install")
+        if new_content != content:
+            df_path.write_text(new_content)
+            logger.info("Replaced npm ci -> npm install in %s Dockerfile", sub)
 
 
 def start_project(
