@@ -17,7 +17,9 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -150,10 +152,15 @@ def run_single(
     pattern: str,
     artifact_dir: Path,
     settings: Settings,
-    llm: BaseLLMClient,
+    llm: BaseLLMClient | None = None,
     llm_per_role: dict[str, BaseLLMClient] | None = None,
 ) -> RunMetrics:
     """Execute one (task × pattern) combination and return metrics.
+
+    When *llm* is ``None`` (the default in parallel mode), fresh LLM clients
+    are built from environment variables so each worker has isolated token
+    counters.  When provided, the caller-supplied client is used (sequential
+    mode backward-compat).
 
     Orchestration metrics are captured automatically via ``context.metrics``
     (an :class:`OrchestrationMetrics` instance that each pattern populates).
@@ -161,18 +168,30 @@ def run_single(
     failed and the error is recorded — no silent fallback.
     """
 
+    # Build per-run LLM clients when none are supplied (parallel mode).
+    if llm is None:
+        llm, llm_per_role = build_llm_clients_from_env(
+            default_provider=settings.llm_provider,
+            default_model=settings.llm_model,
+            default_api_key=settings.openai_api_key,
+            default_base_url=settings.llm_base_url,
+        )
+
     run_artifact_dir = artifact_dir / task_id / pattern
     run_artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    # Set up a per-run file logger
+    # Set up a per-run file logger (use a dedicated logger, not root,
+    # so parallel workers don't interfere with each other).
+    run_logger_name = f"fs_agent.benchmark.run.{task_id}.{pattern}"
+    run_logger = logging.getLogger(run_logger_name)
     run_log_path = run_artifact_dir / "run.log"
     file_handler = logging.FileHandler(run_log_path, mode="w", encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s %(name)-30s %(levelname)-8s %(message)s")
     )
-    root_logger = logging.getLogger()
-    root_logger.addHandler(file_handler)
+    run_logger.addHandler(file_handler)
+    run_logger.setLevel(logging.DEBUG)
 
     # Reset token counters for this run
     llm.reset_usage()
@@ -310,7 +329,7 @@ def run_single(
     )
 
     # Remove the per-run file handler
-    root_logger.removeHandler(file_handler)
+    run_logger.removeHandler(file_handler)
     file_handler.close()
 
     return metrics
@@ -345,8 +364,14 @@ def run_benchmark(
     max_tasks: int | None = None,
     artifact_root: Path | None = None,
     max_validation_retries: int | None = None,
+    workers: int = 1,
 ) -> list[RunMetrics]:
-    """Run the full benchmark and write results to disk."""
+    """Run the full benchmark and write results to disk.
+
+    When *workers* > 1, task × pattern combinations are executed in
+    parallel using a thread pool.  Each worker gets its own LLM client
+    instances so token counters are isolated.
+    """
 
     from dotenv import load_dotenv
 
@@ -369,30 +394,45 @@ def run_benchmark(
     if max_tasks is not None:
         tasks = tasks[:max_tasks]
 
+    # Build the full work queue: list of (task, pattern) tuples.
+    work_items: list[tuple[dict[str, Any], str]] = [
+        (task, pattern)
+        for task in tasks
+        for pattern in patterns
+    ]
+
+    total_runs = len(work_items)
     logger.info(
-        "Benchmark starting: %d tasks × %d patterns = %d runs",
-        len(tasks), len(patterns), len(tasks) * len(patterns),
+        "Benchmark starting: %d tasks × %d patterns = %d runs  (workers=%d)",
+        len(tasks), len(patterns), total_runs, workers,
     )
 
-    # Build shared + per-role LLM clients from env vars
-    llm, llm_per_role = build_llm_clients_from_env(
-        default_provider=base_settings.llm_provider,
-        default_model=base_settings.llm_model,
-        default_api_key=base_settings.openai_api_key,
-        default_base_url=base_settings.llm_base_url,
-    )
-
-    all_metrics: list[RunMetrics] = []
-
-    # Write results incrementally so progress survives interruptions.
     results_dir = artifact_root / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    for task_idx, task in enumerate(tasks, 1):
-        for pat_idx, pattern in enumerate(patterns, 1):
+    all_metrics: list[RunMetrics] = []
+    _results_lock = threading.Lock()
+
+    def _on_result(metrics: RunMetrics) -> None:
+        """Thread-safe callback to collect a result and write incrementally."""
+        with _results_lock:
+            all_metrics.append(metrics)
+            _write_json_report(all_metrics, results_dir / "benchmark_results.json")
+            _write_csv_report(all_metrics, results_dir / "benchmark_results.csv")
+
+    if workers <= 1:
+        # Sequential execution — reuse a single shared LLM client for
+        # backward-compatibility and lower connection overhead.
+        llm, llm_per_role = build_llm_clients_from_env(
+            default_provider=base_settings.llm_provider,
+            default_model=base_settings.llm_model,
+            default_api_key=base_settings.openai_api_key,
+            default_base_url=base_settings.llm_base_url,
+        )
+        for run_idx, (task, pattern) in enumerate(work_items, 1):
             logger.info(
-                "━━━ Task %d/%d  Pattern %d/%d (%s)  id=%s ━━━",
-                task_idx, len(tasks), pat_idx, len(patterns), pattern, task["id"],
+                "━━━ Run %d/%d  task=%s  pattern=%s ━━━",
+                run_idx, total_runs, task["id"], pattern,
             )
             metrics = run_single(
                 task_id=task["id"],
@@ -403,11 +443,49 @@ def run_benchmark(
                 llm=llm,
                 llm_per_role=llm_per_role,
             )
-            all_metrics.append(metrics)
+            _on_result(metrics)
+    else:
+        # Parallel execution — each worker builds its own LLM clients.
+        completed = 0
 
-            # Save after every run so partial results are never lost.
-            _write_json_report(all_metrics, results_dir / "benchmark_results.json")
-            _write_csv_report(all_metrics, results_dir / "benchmark_results.csv")
+        def _worker(task: dict[str, Any], pattern: str) -> RunMetrics:
+            return run_single(
+                task_id=task["id"],
+                instruction=task["instruction"],
+                pattern=pattern,
+                artifact_dir=artifact_root,
+                settings=base_settings,
+                # llm=None → run_single builds its own clients
+            )
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_key = {
+                pool.submit(_worker, task, pattern): (task["id"], pattern)
+                for task, pattern in work_items
+            }
+            for future in as_completed(future_to_key):
+                task_id, pattern = future_to_key[future]
+                completed += 1
+                try:
+                    metrics = future.result()
+                except Exception as exc:
+                    logger.error(
+                        "✗ Worker crashed  task=%s  pattern=%s  %s",
+                        task_id, pattern, exc,
+                    )
+                    metrics = RunMetrics(
+                        task_id=task_id,
+                        task_instruction="",
+                        pattern=pattern,
+                        success=False,
+                        error=f"WorkerCrash: {exc}",
+                    )
+                logger.info(
+                    "━━━ Completed %d/%d  task=%s  pattern=%s  %s ━━━",
+                    completed, total_runs, task_id, pattern,
+                    "OK" if metrics.success else "FAIL",
+                )
+                _on_result(metrics)
 
     # Final summary (requires all runs).
     _write_json_report(all_metrics, results_dir / "benchmark_results.json")

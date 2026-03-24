@@ -64,6 +64,12 @@ def benchmark(
         Path("artifacts") / "benchmark",
         help="Root directory for benchmark outputs",
     ),
+    workers: int = typer.Option(
+        1,
+        "--workers",
+        "-w",
+        help="Number of parallel workers (default: 1 = sequential)",
+    ),
 ) -> None:
     """Run the benchmark suite: every pattern against each task in the dataset."""
 
@@ -79,6 +85,7 @@ def benchmark(
         max_tasks=max_tasks,
         artifact_root=artifact_root,
         max_validation_retries=max_validation_retries,
+        workers=workers,
     )
 
     # Print a rich summary table
