@@ -110,6 +110,12 @@ _COMPONENT_TO_ROLE: dict[str, AgentRole] = {
     "infra": AgentRole.INFRA,
     "integration": AgentRole.BACKEND,  # integration issues default to backend
     "project": AgentRole.INFRA,
+    # Specialized sub-roles are retried via their parent agent in
+    # the validation loop (the registry has all roles registered).
+    "backend_api": AgentRole.BACKEND_API,
+    "backend_db": AgentRole.BACKEND_DB,
+    "frontend_pages": AgentRole.FRONTEND_PAGES,
+    "frontend_ui": AgentRole.FRONTEND_UI,
 }
 
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 from ...context import AgentReport, RunContext
@@ -28,14 +28,41 @@ from .._helpers import execute_agent, run_validation_loop
 
 @dataclass
 class PhaseGroup:
-    """A named group of agent roles managed by one supervisor."""
+    """A named group of agent roles managed by one supervisor.
+
+    Can contain ``children`` sub-phases for deeper hierarchy levels.
+    When ``children`` is non-empty, ``roles`` should be empty — the
+    leaf agents live in the children instead.
+    """
 
     name: str
-    roles: list[AgentRole]
+    roles: list[AgentRole] = field(default_factory=list)
+    children: list[PhaseGroup] = field(default_factory=list)
     description: str = ""
 
+    def all_roles(self) -> list[AgentRole]:
+        """Recursively collect all leaf agent roles."""
+        if self.children:
+            result: list[AgentRole] = []
+            for child in self.children:
+                result.extend(child.all_roles())
+            return result
+        return list(self.roles)
 
-# Default topology: planning → build
+
+# Default 3-level topology for specialized agents:
+#
+#   Root Supervisor
+#   ├─ planning       → [architect]
+#   └─ build
+#       ├─ services
+#       │   ├─ backend_db
+#       │   └─ backend_api
+#       ├─ client
+#       │   ├─ frontend_pages
+#       │   └─ frontend_ui
+#       └─ deployment  → [infra]
+#
 DEFAULT_PHASES: list[PhaseGroup] = [
     PhaseGroup(
         name="planning",
@@ -44,26 +71,44 @@ DEFAULT_PHASES: list[PhaseGroup] = [
     ),
     PhaseGroup(
         name="build",
-        roles=[AgentRole.BACKEND, AgentRole.FRONTEND, AgentRole.INFRA],
         description="Scaffold code, create infrastructure, and deploy the project.",
+        children=[
+            PhaseGroup(
+                name="services",
+                roles=[AgentRole.BACKEND_DB, AgentRole.BACKEND_API],
+                description="Backend services: database layer then API routes.",
+            ),
+            PhaseGroup(
+                name="client",
+                roles=[AgentRole.FRONTEND_PAGES, AgentRole.FRONTEND_UI],
+                description="Frontend client: page routing then reusable UI components.",
+            ),
+            PhaseGroup(
+                name="deployment",
+                roles=[AgentRole.INFRA],
+                description="Infrastructure: Docker, compose, and deployment config.",
+            ),
+        ],
     ),
 ]
 
 
 class HierarchicalOrchestrator(OrchestrationPattern):
-    """Two-level supervisor tree with sub-spec decomposition.
+    """Multi-level supervisor tree with sub-spec decomposition.
 
-    Default hierarchy::
+    Default 3-level hierarchy::
 
         Root Supervisor (LLM)
-        ├─ planning   → [architect]
-        └─ build      → [backend, frontend, infra]
+        ├─ planning     → [architect]
+        └─ build
+            ├─ services    → [backend_db, backend_api]
+            ├─ client      → [frontend_pages, frontend_ui]
+            └─ deployment  → [infra]
 
-    **Key differentiator**: before dispatching each agent in the build
-    phase, the phase supervisor generates a focused sub-specification
-    tailored to that agent's role — extracting only the relevant parts
-    of the full spec plus any upstream agent contracts.  This sub-spec
-    is injected via ``context.extra_context``.
+    **Key differentiator**: phases can contain sub-phases (recursive).
+    Before dispatching each agent, its supervisor generates a focused
+    sub-specification.  The 3-level tree means more supervisor calls
+    and more targeted sub-specs than a flat coordinator.
     """
 
     MAX_ROOT_ITERATIONS = 10
@@ -153,7 +198,7 @@ class HierarchicalOrchestrator(OrchestrationPattern):
                 completed_phases.add(phase_name)
 
                 # All agents across all phases done?
-                all_roles = {r.value for p in self.phases for r in p.roles}
+                all_roles = {r.value for p in self.phases for r in p.all_roles()}
                 if completed_agents >= all_roles:
                     self.logger.info(
                         "  all agents completed after phase '%s'", phase_name
@@ -190,7 +235,7 @@ class HierarchicalOrchestrator(OrchestrationPattern):
         return reports
 
     # ------------------------------------------------------------------
-    # Phase supervisor — NO FALLBACK
+    # Phase supervisor — recursive for sub-phase support
     # ------------------------------------------------------------------
 
     def _run_phase(
@@ -198,16 +243,109 @@ class HierarchicalOrchestrator(OrchestrationPattern):
         context: RunContext,
         phase: PhaseGroup,
         completed_agents: set[str],
+        depth: int = 1,
     ) -> list[AgentReport]:
-        """Run the phase-level supervisor loop for a single phase."""
+        """Run a phase.  If it has children, recurse as a sub-supervisor."""
+
+        # --- Recursive case: phase has sub-phases ---
+        if phase.children:
+            return self._run_parent_phase(context, phase, completed_agents, depth)
+
+        # --- Leaf case: phase has direct agent roles ---
+        return self._run_leaf_phase(context, phase, completed_agents, depth)
+
+    def _run_parent_phase(
+        self,
+        context: RunContext,
+        phase: PhaseGroup,
+        completed_agents: set[str],
+        depth: int,
+    ) -> list[AgentReport]:
+        """Supervisor loop for a phase that contains sub-phases."""
+        m = context.metrics
+        reports: list[AgentReport] = []
+        completed_sub: set[str] = set()
+        indent = "  " * depth
+
+        child_names = [c.name for c in phase.children]
+
+        self.logger.info(
+            "%s┌── phase '%s' supervisor start (sub-phases: %s)",
+            indent, phase.name, ", ".join(child_names),
+        )
+
+        for sub_iter in range(1, self.max_phase_iterations + 1):
+            # Ask which sub-phase to run next
+            decision, coord_call = self._ask_sub_phase_supervisor(
+                context, phase, completed_sub, completed_agents, sub_iter
+            )
+            m.record_coordination_call(coord_call)
+
+            sub_name = decision.get("phase", "done")
+            reason = decision.get("reason", "")
+
+            self.logger.info(
+                "%s│ phase '%s' iter %d: sub-phase=%s  reason=%s  "
+                "tokens=%d  latency=%.2fs",
+                indent, phase.name, sub_iter, sub_name,
+                reason[:120], coord_call.total_tokens, coord_call.latency_seconds,
+            )
+
+            if sub_name == "done":
+                self.logger.info(
+                    "%s│ phase '%s' supervisor signalled DONE: %s",
+                    indent, phase.name, reason,
+                )
+                break
+
+            child = next((c for c in phase.children if c.name == sub_name), None)
+            if child is None:
+                raise OrchestrationError(
+                    "hierarchical",
+                    f"Phase '{phase.name}' supervisor returned unknown sub-phase "
+                    f"'{sub_name}' (valid: {child_names})",
+                    context={"phase": phase.name, "sub_iter": sub_iter},
+                )
+
+            # Recurse into the sub-phase
+            sub_reports = self._run_phase(
+                context, child, completed_agents, depth + 1
+            )
+            reports.extend(sub_reports)
+            completed_sub.add(sub_name)
+
+            # All sub-phases done?
+            if completed_sub >= set(child_names):
+                self.logger.info(
+                    "%s│ all sub-phases in '%s' completed", indent, phase.name
+                )
+                break
+        else:
+            raise OrchestrationError(
+                "hierarchical",
+                f"Phase '{phase.name}' sub-phase supervisor hit max iterations",
+                context={"phase": phase.name},
+            )
+
+        self.logger.info("%s└── phase '%s' supervisor end", indent, phase.name)
+        return reports
+
+    def _run_leaf_phase(
+        self,
+        context: RunContext,
+        phase: PhaseGroup,
+        completed_agents: set[str],
+        depth: int,
+    ) -> list[AgentReport]:
+        """Run the agent-level supervisor loop for a leaf phase."""
         m = context.metrics
         reports: list[AgentReport] = []
         phase_roles = [r.value for r in phase.roles]
+        indent = "  " * depth
 
         self.logger.info(
-            "  ┌── phase '%s' supervisor start  agents=%s",
-            phase.name,
-            ", ".join(phase_roles),
+            "%s┌── phase '%s' supervisor start  agents=%s",
+            indent, phase.name, ", ".join(phase_roles),
         )
 
         for phase_iter in range(1, self.max_phase_iterations + 1):
@@ -220,8 +358,9 @@ class HierarchicalOrchestrator(OrchestrationPattern):
             reason = decision.get("reason", "")
 
             self.logger.info(
-                "  │ phase '%s' iter %d: agent=%s  reason=%s  "
+                "%s│ phase '%s' iter %d: agent=%s  reason=%s  "
                 "tokens=%d  latency=%.2fs",
+                indent,
                 phase.name,
                 phase_iter,
                 agent_name,
@@ -232,7 +371,8 @@ class HierarchicalOrchestrator(OrchestrationPattern):
 
             if agent_name == "done":
                 self.logger.info(
-                    "  │ phase '%s' supervisor signalled DONE: %s",
+                    "%s│ phase '%s' supervisor signalled DONE: %s",
+                    indent,
                     phase.name,
                     reason,
                 )
@@ -283,7 +423,7 @@ class HierarchicalOrchestrator(OrchestrationPattern):
             # All agents in this phase done?
             if all(r.value in completed_agents for r in phase.roles):
                 self.logger.info(
-                    "  │ all agents in phase '%s' completed", phase.name
+                    "%s│ all agents in phase '%s' completed", indent, phase.name
                 )
                 break
         else:
@@ -296,7 +436,7 @@ class HierarchicalOrchestrator(OrchestrationPattern):
                          "max_phase_iterations": self.max_phase_iterations},
             )
 
-        self.logger.info("  └── phase '%s' supervisor end", phase.name)
+        self.logger.info("%s└── phase '%s' supervisor end", indent, phase.name)
         return reports
 
     # ------------------------------------------------------------------
@@ -343,12 +483,44 @@ class HierarchicalOrchestrator(OrchestrationPattern):
                 "- Authentication requirements\n"
                 "- Response shapes for each endpoint\n"
             )
+        elif target_role == AgentRole.BACKEND_DB:
+            prompt += (
+                "- Database tables with exact column names and types\n"
+                "- Migration files needed (CREATE TABLE statements)\n"
+                "- Indexes and constraints\n"
+                "- Seed data requirements\n"
+                "- The db.js connection setup (better-sqlite3, WAL mode)\n"
+            )
+        elif target_role == AgentRole.BACKEND_API:
+            prompt += (
+                "- API routes with exact paths, methods, and handler logic\n"
+                "- Request validation rules for each endpoint\n"
+                "- Response shapes matching the data models\n"
+                "- Authentication/authorization middleware needs\n"
+                "- The database layer is already created — just import from '../db.js'\n"
+            )
         elif target_role == AgentRole.FRONTEND:
             prompt += (
                 "- Pages/routes to implement\n"
                 "- Which backend endpoints to call and their response shapes\n"
                 "- UI components needed\n"
                 "- State management requirements\n"
+            )
+        elif target_role == AgentRole.FRONTEND_PAGES:
+            prompt += (
+                "- Page components to implement with their routes\n"
+                "- Which backend endpoints each page calls\n"
+                "- Layout structure (header, navigation, main content)\n"
+                "- Data fetching hooks needed\n"
+                "- Reusable components will be provided by another agent — just import them\n"
+            )
+        elif target_role == AgentRole.FRONTEND_UI:
+            prompt += (
+                "- Reusable UI components needed (buttons, cards, forms, tables)\n"
+                "- Styling theme and Tailwind classes to use consistently\n"
+                "- Component props interfaces\n"
+                "- Loading/error/empty states for each component\n"
+                "- Pages already exist — focus only on shared components\n"
             )
         elif target_role == AgentRole.INFRA:
             prompt += (
@@ -404,6 +576,86 @@ class HierarchicalOrchestrator(OrchestrationPattern):
         )
 
         return sub_spec.strip(), coord_call
+
+    # ------------------------------------------------------------------
+    # Sub-phase supervisor (for parent phases with children)
+    # ------------------------------------------------------------------
+
+    def _ask_sub_phase_supervisor(
+        self,
+        context: RunContext,
+        parent: PhaseGroup,
+        completed_sub: set[str],
+        completed_agents: set[str],
+        sub_iter: int,
+    ) -> tuple[dict[str, str], CoordinationCall]:
+        """Ask which sub-phase to run next within a parent phase."""
+        child_info = []
+        for child in parent.children:
+            child_roles = [r.value for r in child.all_roles()]
+            child_agents_done = [r for r in child_roles if r in completed_agents]
+            child_info.append({
+                "name": child.name,
+                "description": child.description,
+                "agents": child_roles,
+                "completed_agents": child_agents_done,
+                "done": child.name in completed_sub,
+            })
+        remaining = [c.name for c in parent.children if c.name not in completed_sub]
+
+        prompt = (
+            f"You are the '{parent.name}' phase supervisor.\n"
+            f"This phase has sub-phases:\n{json.dumps(child_info, indent=2)}\n\n"
+            f"Completed sub-phases: {json.dumps(sorted(completed_sub))}\n"
+            f"Remaining: {json.dumps(remaining)}\n\n"
+            "Dependency rules:\n"
+            "- 'services' (backend) should run before 'client' (frontend).\n"
+            "- 'deployment' requires 'services' and 'client' to have completed.\n"
+            "- Once all sub-phases are done, respond with phase 'done'.\n\n"
+            "Respond with exactly one JSON object:\n"
+            '  { "phase": "<sub_phase_name>", "reason": "..." }\n'
+            "or\n"
+            '  { "phase": "done", "reason": "..." }\n'
+        )
+        system = (
+            f"You are the '{parent.name}' sub-phase supervisor. "
+            "Decide which sub-phase runs next. JSON only, no markdown."
+        )
+
+        pre = self.llm.usage_stats.copy()
+        t0 = time.perf_counter()
+
+        try:
+            raw = self.llm.generate(prompt, system=system, temperature=0.0)
+        except Exception as exc:
+            raise OrchestrationError(
+                "hierarchical",
+                f"Sub-phase supervisor call failed for '{parent.name}': {exc}",
+            ) from exc
+
+        latency = time.perf_counter() - t0
+        post = self.llm.usage_stats
+
+        try:
+            decision = self._parse_json_decision(raw, required_key="phase")
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise OrchestrationError(
+                "hierarchical",
+                f"Sub-phase supervisor returned unparseable response: {exc}",
+                context={"raw_response": raw[:500]},
+            ) from exc
+
+        coord_call = CoordinationCall(
+            purpose=f"sub_phase_supervisor_{parent.name}_iter_{sub_iter}",
+            prompt_tokens=post["prompt_tokens"] - pre["prompt_tokens"],
+            completion_tokens=post["completion_tokens"] - pre["completion_tokens"],
+            total_tokens=post["total_tokens"] - pre["total_tokens"],
+            latency_seconds=round(latency, 4),
+            raw_response=raw,
+            parsed_result=decision,
+            iteration=sub_iter,
+        )
+        return decision, coord_call
 
     # ------------------------------------------------------------------
     # Root supervisor LLM interaction — NO FALLBACK

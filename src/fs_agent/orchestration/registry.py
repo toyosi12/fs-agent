@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from typing import Dict, Type
 
-from ..agents import ArchitectAgent, BackendAgent, FrontendAgent, InfraAgent
+from ..agents import (
+    ArchitectAgent,
+    BackendAgent,
+    BackendApiAgent,
+    BackendDbAgent,
+    FrontendAgent,
+    FrontendPagesAgent,
+    FrontendUiAgent,
+    InfraAgent,
+)
 from ..agents.base import AgentRole, BaseAgent
 
 
@@ -25,7 +34,13 @@ class AgentRegistry:
 
 
 def register_default_agents(registry: AgentRegistry) -> None:
+    """Register all agents including specialized sub-role agents."""
     registry.register(AgentRole.ARCHITECT, ArchitectAgent)
     registry.register(AgentRole.BACKEND, BackendAgent)
     registry.register(AgentRole.FRONTEND, FrontendAgent)
     registry.register(AgentRole.INFRA, InfraAgent)
+    # Specialized sub-agents for hierarchical decomposition
+    registry.register(AgentRole.BACKEND_DB, BackendDbAgent)
+    registry.register(AgentRole.BACKEND_API, BackendApiAgent)
+    registry.register(AgentRole.FRONTEND_PAGES, FrontendPagesAgent)
+    registry.register(AgentRole.FRONTEND_UI, FrontendUiAgent)
