@@ -1,8 +1,10 @@
-"""Decentralized orchestration pattern — agent-driven handoff routing.
+"""Decentralized orchestration pattern — agent-driven negotiation.
 
 Each completing agent decides who runs next via an LLM handoff call.
-**No fallbacks** — if a handoff fails or returns an invalid agent the
-run is aborted with :class:`OrchestrationError`.
+After both backend and frontend have run, a negotiation phase compares
+their contracts.  If mismatches are detected, agents are re-run with
+feedback (up to ``MAX_NEGOTIATION_ROUNDS`` rounds).  This tests whether
+inter-agent feedback improves integration quality.
 """
 
 from __future__ import annotations
@@ -22,20 +24,24 @@ from .._helpers import execute_agent, run_validation_loop
 
 
 class DecentralizedOrchestrator(OrchestrationPattern):
-    """Each agent decides who runs next via an LLM handoff call.
+    """Agent-driven handoff with negotiation feedback loops.
 
     Routing intelligence is distributed: after every agent completes, the
     orchestrator asks the *outgoing* agent's LLM "given what you just
     produced, who should handle this next?"
 
-    The seed agent is always ``architect``.  Execution continues until an
-    agent hands off to ``"done"`` or all agents have run.
+    **Negotiation phase**: after both backend and frontend have completed
+    their initial runs, their contracts are compared.  If the mediator
+    detects mismatches (e.g. endpoints the frontend calls but the backend
+    doesn't serve), the mismatched agent is re-run with corrective
+    feedback.  Up to ``MAX_NEGOTIATION_ROUNDS`` rounds of negotiation
+    are performed.
 
-    **Research mode**: all fallbacks removed — failures raise
-    :class:`OrchestrationError`.
+    The seed agent is always ``architect``.
     """
 
     MAX_ITERATIONS = 10
+    MAX_NEGOTIATION_ROUNDS = 2
     SEED_ROLE = AgentRole.ARCHITECT
 
     def __init__(
@@ -94,12 +100,27 @@ class DecentralizedOrchestrator(OrchestrationPattern):
                     current_role.value,
                 )
 
+                # Inject upstream context based on completed agents' contracts
+                context.extra_context = self._build_upstream_context(
+                    current_role, context
+                )
+
                 # Dispatch the current agent
                 agent = self.registry.build(current_role)
                 report, execution = execute_agent(agent, current_role, context)
                 m.record_agent_execution(execution)
                 reports.append(report)
                 completed.add(current_role.value)
+
+                # --- Negotiation phase ---
+                # After frontend runs, compare contracts with backend and
+                # re-run mismatched agent(s) with corrective feedback.
+                if (
+                    current_role == AgentRole.FRONTEND
+                    and AgentRole.BACKEND.value in completed
+                ):
+                    neg_reports = self._negotiate(context, m, completed)
+                    reports.extend(neg_reports)
 
                 # All agents done?
                 if completed >= set(all_roles):
@@ -178,10 +199,149 @@ class DecentralizedOrchestrator(OrchestrationPattern):
             m.error = f"{type(exc).__name__}: {exc}"
             raise
         finally:
+            context.extra_context = {}
             m.stop_timer()
             self._log_summary(m, reports)
 
         return reports
+
+    # ------------------------------------------------------------------
+    # Upstream context injection (like sequential pipeline)
+    # ------------------------------------------------------------------
+
+    def _build_upstream_context(
+        self, role: AgentRole, context: RunContext
+    ) -> dict[str, str]:
+        """Build upstream context from completed agents' contracts."""
+        if role == AgentRole.ARCHITECT:
+            return {}
+        parts: list[str] = []
+        backend_contract = context.extract_backend_contract()
+        if backend_contract and role in (AgentRole.FRONTEND, AgentRole.INFRA):
+            parts.append(f"=== Backend Contract ===\n{backend_contract}")
+        frontend_contract = context.extract_frontend_contract()
+        if frontend_contract and role == AgentRole.INFRA:
+            parts.append(f"=== Frontend Contract ===\n{frontend_contract}")
+        if not parts:
+            return {}
+        return {"upstream_context": "\n\n".join(parts)}
+
+    # ------------------------------------------------------------------
+    # Negotiation phase — the key differentiator
+    # ------------------------------------------------------------------
+
+    def _negotiate(
+        self,
+        context: RunContext,
+        m: object,
+        completed: set[str],
+    ) -> list[AgentReport]:
+        """Compare backend/frontend contracts; re-run mismatched agents."""
+        extra_reports: list[AgentReport] = []
+
+        for round_num in range(1, self.MAX_NEGOTIATION_ROUNDS + 1):
+            self.logger.info(
+                "── negotiation round %d/%d ──────────────────────────────",
+                round_num,
+                self.MAX_NEGOTIATION_ROUNDS,
+            )
+
+            feedback, coord_call = self._detect_mismatches(context, round_num)
+            m.record_coordination_call(coord_call)
+
+            target = feedback.get("target")
+            issues = feedback.get("issues", "")
+
+            if target == "none":
+                self.logger.info(
+                    "  negotiation: no mismatches detected — done"
+                )
+                break
+
+            self.logger.info(
+                "  negotiation: re-running %s — %s",
+                target,
+                issues[:200],
+            )
+
+            try:
+                rerun_role = AgentRole(target)
+            except ValueError:
+                self.logger.warning(
+                    "  negotiation: unknown target '%s', skipping", target
+                )
+                break
+
+            # Re-run the mismatched agent with corrective feedback
+            context.extra_context = {
+                "upstream_context": (
+                    f"=== NEGOTIATION FEEDBACK (round {round_num}) ===\n"
+                    f"The following integration issues were detected between "
+                    f"your output and the other agents' output:\n\n{issues}\n\n"
+                    f"Please regenerate your code to fix these issues. "
+                    f"Keep everything else the same."
+                )
+            }
+
+            agent = self.registry.build(rerun_role)
+            report, execution = execute_agent(agent, rerun_role, context)
+            m.record_agent_execution(execution)
+            extra_reports.append(report)
+
+        return extra_reports
+
+    def _detect_mismatches(
+        self,
+        context: RunContext,
+        round_num: int,
+    ) -> tuple[dict[str, str], CoordinationCall]:
+        """Use LLM to compare backend/frontend contracts for mismatches."""
+        backend_contract = context.extract_backend_contract() or "(no backend output)"
+        frontend_contract = context.extract_frontend_contract() or "(no frontend output)"
+
+        prompt = (
+            "Compare these two contracts from a backend and frontend agent.\n"
+            "Identify any integration mismatches:\n"
+            "- Endpoints the frontend fetches that the backend doesn't serve\n"
+            "- Field name mismatches between API response shapes and frontend usage\n"
+            "- Port or URL mismatches\n"
+            "- Missing CORS or proxy configuration\n\n"
+            f"Backend contract:\n{backend_contract}\n\n"
+            f"Frontend contract:\n{frontend_contract}\n\n"
+            "Respond with JSON only:\n"
+            '  { "target": "backend"|"frontend"|"none", '
+            '"issues": "description of mismatches" }\n'
+            "Use target 'none' if no mismatches found."
+        )
+
+        system = (
+            "You are a contract comparison engine for a multi-agent system. "
+            "Respond with JSON only — no markdown fences."
+        )
+
+        pre = self.llm.usage_stats.copy()
+        t0 = time.perf_counter()
+        raw = self.llm.generate(prompt, system=system, temperature=0.0)
+        latency = time.perf_counter() - t0
+        post = self.llm.usage_stats
+
+        try:
+            result = self._parse_handoff(raw)  # reuse JSON parser
+        except (json.JSONDecodeError, ValueError):
+            result = {"target": "none", "issues": ""}
+
+        coord_call = CoordinationCall(
+            purpose=f"negotiation_mismatch_detection_round_{round_num}",
+            prompt_tokens=post["prompt_tokens"] - pre["prompt_tokens"],
+            completion_tokens=post["completion_tokens"] - pre["completion_tokens"],
+            total_tokens=post["total_tokens"] - pre["total_tokens"],
+            latency_seconds=round(latency, 4),
+            raw_response=raw[:500],
+            parsed_result=result,
+            iteration=round_num,
+        )
+
+        return result, coord_call
 
     # ------------------------------------------------------------------
     # Handoff LLM interaction — NO FALLBACK

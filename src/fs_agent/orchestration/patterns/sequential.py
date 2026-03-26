@@ -1,7 +1,8 @@
-"""Sequential orchestration pattern — deterministic agent pipeline.
+"""Sequential orchestration pattern — artifact-passing pipeline.
 
-No LLM coordination, no fallbacks.  Agents run in a fixed order.
-Metrics are captured for research benchmarking (RQ1–RQ3).
+Agents run in a fixed order.  Each agent's extracted output contract is
+passed downstream so later agents react to what was *actually generated*,
+not just what the spec planned.  No LLM coordination overhead.
 """
 
 from __future__ import annotations
@@ -17,10 +18,12 @@ from .._helpers import execute_agent, run_validation_loop
 
 
 class SequentialOrchestrator(OrchestrationPattern):
-    """Executes agents one after another in a deterministic order.
+    """Artifact-passing pipeline — each agent feeds the next.
 
-    This is the baseline pattern — no LLM coordination overhead.
-    Coordination token counts will always be zero.
+    After each agent completes, its output is extracted into a compact
+    contract and injected into ``context.extra_context`` for the next
+    agent.  This is the baseline pattern — zero LLM coordination
+    overhead, but downstream agents see upstream artifacts.
     """
 
     def __init__(
@@ -56,6 +59,10 @@ class SequentialOrchestrator(OrchestrationPattern):
                     "── [%d/%d] %s ──────────────────────────────────────",
                     idx, len(self.order), role.value,
                 )
+
+                # Inject upstream artifacts into context for this agent
+                context.extra_context = self._build_upstream_context(role, context)
+
                 agent = self.registry.build(role)
                 report, execution = execute_agent(agent, role, context)
                 m.record_agent_execution(execution)
@@ -74,10 +81,40 @@ class SequentialOrchestrator(OrchestrationPattern):
             m.error = f"{type(exc).__name__}: {exc}"
             raise
         finally:
+            context.extra_context = {}  # clean up
             m.stop_timer()
             self._log_summary(m, reports)
 
         return reports
+
+    def _build_upstream_context(
+        self, role: AgentRole, context: RunContext
+    ) -> dict[str, str]:
+        """Build upstream context for the given role from completed agents."""
+        if role == AgentRole.ARCHITECT:
+            return {}
+
+        parts: list[str] = []
+
+        if role in (AgentRole.FRONTEND, AgentRole.INFRA):
+            backend_contract = context.extract_backend_contract()
+            if backend_contract:
+                parts.append(
+                    "=== Backend Agent Output (actual generated code) ===\n"
+                    f"{backend_contract}"
+                )
+
+        if role == AgentRole.INFRA:
+            frontend_contract = context.extract_frontend_contract()
+            if frontend_contract:
+                parts.append(
+                    "=== Frontend Agent Output (actual generated code) ===\n"
+                    f"{frontend_contract}"
+                )
+
+        if not parts:
+            return {}
+        return {"upstream_context": "\n\n".join(parts)}
 
     def _log_summary(self, m: object, reports: list[AgentReport]) -> None:
         self.logger.info(

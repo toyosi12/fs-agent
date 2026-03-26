@@ -58,7 +58,7 @@ def _build_pattern(
     if settings.orchestration_pattern == "hierarchical":
         return HierarchicalOrchestrator(registry=registry, llm=llm)
     if settings.orchestration_pattern == "parallel":
-        return ParallelOrchestrator(registry=registry)
+        return ParallelOrchestrator(registry=registry, llm=llm)
     raise ValueError(f"Unsupported orchestration pattern: {settings.orchestration_pattern}")
 
 

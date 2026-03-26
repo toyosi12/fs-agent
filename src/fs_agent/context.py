@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +53,9 @@ class RunContext:
     transcripts: list[AgentReport] = field(default_factory=list)
     # Populated by the orchestration pattern during a run.
     metrics: OrchestrationMetrics = field(default_factory=lambda: _make_metrics())
+    # Pattern-injected context: patterns set this before running an agent
+    # so agents can incorporate inter-agent artifacts into their prompts.
+    extra_context: dict[str, Any] = field(default_factory=dict)
 
     def record(self, report: AgentReport) -> None:
         self.transcripts.append(report)
@@ -135,6 +139,113 @@ class RunContext:
             "metadata": spec.metadata.model_dump(mode="json"),
             "infra": spec.infra.model_dump(mode="json"),
         }
+
+    # ------------------------------------------------------------------
+    # Inter-agent artifact access
+    # ------------------------------------------------------------------
+
+    def agent_output(self, role: str) -> dict[str, Any] | None:
+        """Return the artifacts dict from a completed agent, or None."""
+        for report in self.transcripts:
+            if report.role == role:
+                return report.artifacts
+        return None
+
+    def extract_backend_contract(self) -> str:
+        """Extract a compact API contract from the backend agent's actual output.
+
+        Parses the generated router code to find route definitions and
+        returns a focused summary (~500 tokens) that downstream agents can
+        use without needing the full source.
+        """
+        output = self.agent_output("backend")
+        if not output:
+            return ""
+
+        parts: list[str] = []
+
+        # 1. Extract route signatures from the generated source code
+        source = output.get("backend_source", {})
+        body = source.get("body", "")
+        if body:
+            # Pull route definitions: router.get('/path', ...) or app.get(...)
+            import re as _re
+            routes = _re.findall(
+                r"(?:router|app)\.(get|post|put|patch|delete)\(\s*['\"]([^'\"]+)['\"]",
+                body,
+                _re.IGNORECASE,
+            )
+            if routes:
+                parts.append("Implemented routes:")
+                for method, path in routes:
+                    parts.append(f"  {method.upper()} {path}")
+
+        # 2. Include the blueprint endpoint details (has request/response hints)
+        blueprint = output.get("backend_blueprint", {})
+        endpoints = blueprint.get("endpoints", [])
+        if endpoints:
+            parts.append("\nEndpoint contracts:")
+            for ep in endpoints:
+                line = f"  {ep.get('method', 'GET')} {ep.get('path', '/')}: {ep.get('name', '')}"
+                parts.append(line)
+
+        # 3. Database models if present
+        db = blueprint.get("database", {})
+        models = db.get("models", [])
+        if models:
+            parts.append("\nDatabase tables:")
+            for model in models:
+                fields = model.get("fields", {})
+                field_list = ", ".join(f"{k}: {v}" for k, v in fields.items())
+                parts.append(f"  {model.get('name', '?')} ({field_list})")
+
+        # 4. Package dependencies (tells frontend what libraries are available)
+        mcp_plan = output.get("backend_mcp_plan", {})
+        for f in mcp_plan.get("files", []):
+            if f.get("path") == "package.json":
+                try:
+                    pkg = json.loads(f["contents"])
+                    deps = list(pkg.get("dependencies", {}).keys())
+                    if deps:
+                        parts.append(f"\nBackend dependencies: {', '.join(deps)}")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+                break
+
+        return "\n".join(parts) if parts else ""
+
+    def extract_frontend_contract(self) -> str:
+        """Extract a compact summary of the frontend's actual output."""
+        output = self.agent_output("frontend")
+        if not output:
+            return ""
+
+        parts: list[str] = []
+
+        blueprint = output.get("frontend_blueprint", {})
+        routes = blueprint.get("routes", [])
+        if routes:
+            parts.append("Frontend routes:")
+            for r in routes:
+                parts.append(f"  {r.get('path', '/')}: {r.get('description', '')}")
+
+        components = blueprint.get("components", [])
+        if components:
+            parts.append("\nComponents:")
+            for c in components:
+                parts.append(f"  {c.get('name', '?')}: {c.get('description', '')}")
+
+        # Extract actual fetch calls from generated code
+        source = output.get("frontend_source", {})
+        body = source.get("body", "")
+        if body:
+            import re as _re
+            fetches = _re.findall(r"fetch\(['\"`]([^'\"`]+)['\"`]", body)
+            if fetches:
+                seen = sorted(set(fetches))
+                parts.append(f"\nAPI calls made: {', '.join(seen)}")
+
+        return "\n".join(parts) if parts else ""
 
     # ------------------------------------------------------------------
     # LLM selection

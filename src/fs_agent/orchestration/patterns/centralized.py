@@ -1,8 +1,10 @@
-"""Centralized orchestration pattern — LLM-driven coordinator loop.
+"""Centralized orchestration pattern — LLM mediator loop.
 
-The coordinator LLM decides which agent runs next.  **No fallbacks** —
-if the coordinator returns an invalid response or the LLM call fails,
-the run is aborted with :class:`OrchestrationError`.
+The coordinator LLM decides which agent runs next **and** synthesizes
+an integration brief from completed agents' actual output.  Each agent
+receives a focused context summary produced by the mediator, not raw
+artifacts.  This adds one extra LLM call per agent transition compared
+to the sequential pipeline.
 """
 
 from __future__ import annotations
@@ -22,15 +24,16 @@ from .._helpers import execute_agent, run_validation_loop
 
 
 class CentralizedOrchestrator(OrchestrationPattern):
-    """Uses the LLM as a coordinator to decide which agent runs next.
+    """Uses the LLM as a mediator to decide order AND synthesize context.
 
-    Instead of a hardcoded sequence the coordinator loop asks the LLM:
-    "Given what has been completed so far, which agent should run next —
-    or are we done?"  The chosen agent is dispatched through the same
-    registry and context machinery used by the sequential pattern.
+    Each iteration the coordinator:
+    1. Decides which agent runs next (or declares done).
+    2. Synthesizes an *integration brief* from all completed agents'
+       real output and injects it into ``context.extra_context``.
 
-    **Research mode**: all fallbacks removed — failures raise
-    :class:`OrchestrationError`.
+    This means each agent sees a mediator-curated summary rather than
+    raw contract extractions.  The extra synthesis call is recorded as
+    coordination overhead.
     """
 
     MAX_ITERATIONS = 10
@@ -112,6 +115,18 @@ class CentralizedOrchestrator(OrchestrationPattern):
 
                 # Dispatch
                 agent = self.registry.build(role)
+
+                # Before dispatching, synthesize a mediator brief from completed
+                # agents' contracts (the key differentiator from sequential pipeline)
+                if context.transcripts:
+                    brief, brief_call = self._synthesize_brief(
+                        context, role, iteration
+                    )
+                    m.record_coordination_call(brief_call)
+                    context.extra_context = {"upstream_context": brief}
+                else:
+                    context.extra_context = {}
+
                 report, execution = execute_agent(agent, role, context)
                 m.record_agent_execution(execution)
                 reports.append(report)
@@ -140,10 +155,91 @@ class CentralizedOrchestrator(OrchestrationPattern):
             m.error = f"{type(exc).__name__}: {exc}"
             raise
         finally:
+            context.extra_context = {}
             m.stop_timer()
             self._log_summary(m, reports)
 
         return reports
+
+    # ------------------------------------------------------------------
+    # Mediator brief synthesis — the key differentiator
+    # ------------------------------------------------------------------
+
+    def _synthesize_brief(
+        self,
+        context: RunContext,
+        next_role: AgentRole,
+        iteration: int,
+    ) -> tuple[str, CoordinationCall]:
+        """Ask the LLM to produce a focused integration brief for *next_role*.
+
+        The brief is synthesized from compact contract extractions of all
+        completed agents — NOT from full source code.
+        """
+        contracts: list[str] = []
+        backend_contract = context.extract_backend_contract()
+        if backend_contract:
+            contracts.append(f"[backend contract]\n{backend_contract}")
+        frontend_contract = context.extract_frontend_contract()
+        if frontend_contract:
+            contracts.append(f"[frontend contract]\n{frontend_contract}")
+
+        completed_summary = "\n---\n".join(contracts) if contracts else "(none yet)"
+
+        prompt = (
+            f"You are a mediator for a multi-agent code-generation system.\n"
+            f"The next agent to run is: {next_role.value}\n\n"
+            f"Completed agents' output contracts:\n{completed_summary}\n\n"
+            f"User request:\n{context.user_request}\n\n"
+            f"Write a concise integration brief (max 400 words) for the "
+            f"{next_role.value} agent. Focus on:\n"
+            f"- Exact API endpoints/routes it must integrate with\n"
+            f"- Data shapes and field names it must match\n"
+            f"- Port numbers and service URLs\n"
+            f"- Any constraints from upstream agents\n\n"
+            f"Be specific and actionable. Output plain text, no JSON."
+        )
+
+        system = (
+            "You are a technical mediator synthesizing integration context "
+            "for downstream agents. Be precise and concise."
+        )
+
+        pre = self.llm.usage_stats.copy()
+        t0 = time.perf_counter()
+
+        try:
+            brief = self.llm.generate(prompt, system=system, temperature=0.0)
+        except Exception as exc:
+            raise OrchestrationError(
+                "centralized",
+                f"Mediator brief synthesis failed at iteration {iteration}: {exc}",
+                context={"iteration": iteration, "next_role": next_role.value},
+            ) from exc
+
+        latency = time.perf_counter() - t0
+        post = self.llm.usage_stats
+
+        coord_call = CoordinationCall(
+            purpose=f"mediator_brief_for_{next_role.value}_iter_{iteration}",
+            prompt_tokens=post["prompt_tokens"] - pre["prompt_tokens"],
+            completion_tokens=post["completion_tokens"] - pre["completion_tokens"],
+            total_tokens=post["total_tokens"] - pre["total_tokens"],
+            latency_seconds=round(latency, 4),
+            raw_response=brief[:500],
+            parsed_result={"brief_length": len(brief)},
+            iteration=iteration,
+        )
+
+        self.logger.info(
+            "  mediator brief for %s: %d chars, %d tokens, %.2fs",
+            next_role.value,
+            len(brief),
+            coord_call.total_tokens,
+            coord_call.latency_seconds,
+        )
+
+        return brief.strip(), coord_call
 
     # ------------------------------------------------------------------
     # Coordinator LLM interaction — NO FALLBACK
