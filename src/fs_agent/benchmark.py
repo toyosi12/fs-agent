@@ -142,7 +142,7 @@ def _build_pattern(
     if name == "hierarchical":
         return HierarchicalOrchestrator(registry=registry, llm=llm)
     if name == "parallel":
-        return ParallelOrchestrator(registry=registry)
+        return ParallelOrchestrator(registry=registry, llm=llm)
     raise ValueError(f"Unknown pattern: {name}")
 
 

@@ -138,6 +138,14 @@ class BackendAgent(BaseAgent):
                 "Use in-memory data structures (arrays/maps) as a data store. "
             )
         prompt += "Do NOT use TypeScript. Do NOT leave TODO comments or placeholder stubs.\n"
+        # Inject pattern-provided inter-agent context
+        upstream = context.extra_context.get("upstream_context", "")
+        if upstream:
+            prompt += (
+                "\n--- UPSTREAM CONTEXT (from orchestration pattern) ---\n"
+                f"{upstream}\n"
+                "--- END UPSTREAM CONTEXT ---\n"
+            )
         prompt += (
             "\nAlso generate a companion test file using Jest. The tests should:\n"
             "- Import supertest and the Express app\n"

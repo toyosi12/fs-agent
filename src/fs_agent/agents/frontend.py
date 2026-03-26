@@ -149,6 +149,16 @@ class FrontendAgent(BaseAgent):
             "\nDo NOT create mock data or fake API responses. All data must come from "
             "real fetch() calls to the backend API endpoints listed above. "
             "Match the exact response schema for each endpoint."
+        )
+        # Inject pattern-provided inter-agent context
+        upstream = context.extra_context.get("upstream_context", "")
+        if upstream:
+            prompt += (
+                "\n\n--- UPSTREAM CONTEXT (from orchestration pattern) ---\n"
+                f"{upstream}\n"
+                "--- END UPSTREAM CONTEXT ---\n"
+            )
+        prompt += (
             "\n\nAlso generate a companion test file using Vitest and React Testing Library. "
             "The tests should:\n"
             "- Import components and render them with @testing-library/react\n"

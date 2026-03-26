@@ -1,9 +1,12 @@
-"""Hierarchical orchestration pattern — two-level supervisor tree.
+"""Hierarchical orchestration pattern — sub-spec decomposition.
 
 Root supervisor picks which **phase** to execute; within each phase a
-phase supervisor picks which **agent** runs next.  **No fallbacks** —
-if any supervisor call fails the run is aborted with
-:class:`OrchestrationError`.
+phase supervisor first **decomposes** the spec into a focused sub-spec
+for each agent, then dispatches agents with their sub-specs.
+
+The key differentiator: agents receive a *supervisor-curated sub-
+specification* rather than the full user spec, focusing each agent on
+its precise responsibilities.
 """
 
 from __future__ import annotations
@@ -48,7 +51,7 @@ DEFAULT_PHASES: list[PhaseGroup] = [
 
 
 class HierarchicalOrchestrator(OrchestrationPattern):
-    """Two-level supervisor tree for agent orchestration.
+    """Two-level supervisor tree with sub-spec decomposition.
 
     Default hierarchy::
 
@@ -56,8 +59,11 @@ class HierarchicalOrchestrator(OrchestrationPattern):
         ├─ planning   → [architect]
         └─ build      → [backend, frontend, infra]
 
-    **Research mode**: all fallbacks removed — failures raise
-    :class:`OrchestrationError`.
+    **Key differentiator**: before dispatching each agent in the build
+    phase, the phase supervisor generates a focused sub-specification
+    tailored to that agent's role — extracting only the relevant parts
+    of the full spec plus any upstream agent contracts.  This sub-spec
+    is injected via ``context.extra_context``.
     """
 
     MAX_ROOT_ITERATIONS = 10
@@ -177,6 +183,7 @@ class HierarchicalOrchestrator(OrchestrationPattern):
             m.error = f"{type(exc).__name__}: {exc}"
             raise
         finally:
+            context.extra_context = {}
             m.stop_timer()
             self._log_summary(m, reports)
 
@@ -259,7 +266,14 @@ class HierarchicalOrchestrator(OrchestrationPattern):
                              "completed": sorted(completed_agents)},
                 )
 
-            # Dispatch
+            # Dispatch — with sub-spec decomposition
+            # The phase supervisor generates a focused brief for this agent
+            sub_spec, sub_spec_call = self._decompose_sub_spec(
+                context, phase, role, completed_agents
+            )
+            m.record_coordination_call(sub_spec_call)
+            context.extra_context = {"upstream_context": sub_spec} if sub_spec else {}
+
             agent = self.registry.build(role)
             report, execution = execute_agent(agent, role, context)
             m.record_agent_execution(execution)
@@ -284,6 +298,112 @@ class HierarchicalOrchestrator(OrchestrationPattern):
 
         self.logger.info("  └── phase '%s' supervisor end", phase.name)
         return reports
+
+    # ------------------------------------------------------------------
+    # Sub-spec decomposition — the key differentiator
+    # ------------------------------------------------------------------
+
+    def _decompose_sub_spec(
+        self,
+        context: RunContext,
+        phase: PhaseGroup,
+        target_role: AgentRole,
+        completed_agents: set[str],
+    ) -> tuple[str, CoordinationCall]:
+        """Ask the LLM to decompose the full spec into a focused sub-spec.
+
+        The sub-spec tells the target agent exactly what to build,
+        incorporating upstream contract info where available.
+        """
+        # Gather upstream contracts
+        contracts: list[str] = []
+        backend_contract = context.extract_backend_contract()
+        if backend_contract:
+            contracts.append(f"[backend contract]\n{backend_contract}")
+        frontend_contract = context.extract_frontend_contract()
+        if frontend_contract:
+            contracts.append(f"[frontend contract]\n{frontend_contract}")
+
+        upstream_info = "\n---\n".join(contracts) if contracts else "(none yet)"
+
+        prompt = (
+            f"You are the '{phase.name}' phase supervisor.\n"
+            f"The next agent to run is: {target_role.value}\n\n"
+            f"Full user request:\n{context.user_request}\n\n"
+            f"Upstream agent contracts:\n{upstream_info}\n\n"
+            f"Completed agents so far: {json.dumps(sorted(completed_agents))}\n\n"
+            f"Write a focused sub-specification for the {target_role.value} agent. "
+            f"Include ONLY what this specific agent needs to know:\n"
+        )
+
+        if target_role == AgentRole.BACKEND:
+            prompt += (
+                "- API routes to implement with exact paths and methods\n"
+                "- Database tables and columns needed\n"
+                "- Authentication requirements\n"
+                "- Response shapes for each endpoint\n"
+            )
+        elif target_role == AgentRole.FRONTEND:
+            prompt += (
+                "- Pages/routes to implement\n"
+                "- Which backend endpoints to call and their response shapes\n"
+                "- UI components needed\n"
+                "- State management requirements\n"
+            )
+        elif target_role == AgentRole.INFRA:
+            prompt += (
+                "- Services to containerize and their ports\n"
+                "- Environment variables needed\n"
+                "- Docker networking requirements\n"
+                "- Database initialization steps\n"
+            )
+        else:
+            prompt += "- Key deliverables and constraints\n"
+
+        prompt += "\nBe specific and actionable. Output plain text, no JSON."
+
+        system = (
+            "You are a phase supervisor decomposing a project specification "
+            "into focused sub-specifications for individual agents. "
+            "Be precise and concise — max 400 words."
+        )
+
+        pre = self.llm.usage_stats.copy()
+        t0 = time.perf_counter()
+
+        try:
+            sub_spec = self.llm.generate(prompt, system=system, temperature=0.0)
+        except Exception as exc:
+            raise OrchestrationError(
+                "hierarchical",
+                f"Sub-spec decomposition failed for {target_role.value} "
+                f"in phase '{phase.name}': {exc}",
+                context={"phase": phase.name, "target_role": target_role.value},
+            ) from exc
+
+        latency = time.perf_counter() - t0
+        post = self.llm.usage_stats
+
+        coord_call = CoordinationCall(
+            purpose=f"sub_spec_{target_role.value}_phase_{phase.name}",
+            prompt_tokens=post["prompt_tokens"] - pre["prompt_tokens"],
+            completion_tokens=post["completion_tokens"] - pre["completion_tokens"],
+            total_tokens=post["total_tokens"] - pre["total_tokens"],
+            latency_seconds=round(latency, 4),
+            raw_response=sub_spec[:500],
+            parsed_result={"sub_spec_length": len(sub_spec)},
+            iteration=0,
+        )
+
+        self.logger.info(
+            "  │ sub-spec for %s: %d chars, %d tokens, %.2fs",
+            target_role.value,
+            len(sub_spec),
+            coord_call.total_tokens,
+            coord_call.latency_seconds,
+        )
+
+        return sub_spec.strip(), coord_call
 
     # ------------------------------------------------------------------
     # Root supervisor LLM interaction — NO FALLBACK
