@@ -56,6 +56,9 @@ class RunContext:
     # Pattern-injected context: patterns set this before running an agent
     # so agents can incorporate inter-agent artifacts into their prompts.
     extra_context: dict[str, Any] = field(default_factory=dict)
+    # Task-level test cases from the dataset (ui_instruct, backend_test_cases,
+    # data_structures).  Populated when --include-test-cases is set.
+    task_test_cases: dict[str, Any] = field(default_factory=dict)
 
     def record(self, report: AgentReport) -> None:
         self.transcripts.append(report)

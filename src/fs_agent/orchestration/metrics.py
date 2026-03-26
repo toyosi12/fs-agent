@@ -94,6 +94,9 @@ class OrchestrationMetrics:
     # ---- Wall-clock tracking ----
     _start_time: float = field(default=0.0, repr=False)
 
+    # ---- Fixer loop metrics ----
+    fixer_loop_result: dict[str, Any] = field(default_factory=dict)
+
     # ------------------------------------------------------------------
     # Builder helpers (called by orchestration patterns)
     # ------------------------------------------------------------------
@@ -245,4 +248,6 @@ class OrchestrationMetrics:
                 }
                 for c in self.coordination_calls
             ],
+            # Fixer loop
+            "fixer_loop": self.fixer_loop_result,
         }

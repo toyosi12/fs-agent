@@ -70,6 +70,16 @@ def benchmark(
         "-w",
         help="Number of parallel workers (default: 1 = sequential)",
     ),
+    include_test_cases: bool = typer.Option(
+        False,
+        "--include-test-cases",
+        help="Include dataset test cases as acceptance criteria in the architect prompt",
+    ),
+    max_fixer_iterations: int = typer.Option(
+        3,
+        "--max-fixer-iterations",
+        help="Maximum fixer↔infra loop iterations (0 to disable)",
+    ),
 ) -> None:
     """Run the benchmark suite: every pattern against each task in the dataset."""
 
@@ -86,6 +96,8 @@ def benchmark(
         artifact_root=artifact_root,
         max_validation_retries=max_validation_retries,
         workers=workers,
+        include_test_cases=include_test_cases,
+        max_fixer_iterations=max_fixer_iterations,
     )
 
     # Print a rich summary table

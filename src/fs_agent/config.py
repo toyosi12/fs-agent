@@ -25,6 +25,10 @@ class Settings(BaseModel):
     llm_model: str = Field(default_factory=lambda: os.getenv("FS_AGENT_LLM_MODEL", "gpt-4o-mini"))
     llm_base_url: str | None = Field(default_factory=lambda: os.getenv("FS_AGENT_LLM_BASE_URL"))
     openai_api_key: str | None = Field(default_factory=lambda: os.getenv("FS_AGENT_OPENAI_API_KEY"))
+    include_test_cases: bool = False
+    max_fixer_iterations: int = Field(
+        default_factory=lambda: int(os.getenv("FS_AGENT_MAX_FIXER_ITERATIONS", "3"))
+    )
 
 
 @lru_cache(maxsize=1)

@@ -21,6 +21,8 @@ class AgentRole(str, Enum):
     BACKEND_DB = "backend_db"
     FRONTEND_PAGES = "frontend_pages"
     FRONTEND_UI = "frontend_ui"
+    # Post-generation fix agent
+    FIXER = "fixer"
 
 
 @dataclass

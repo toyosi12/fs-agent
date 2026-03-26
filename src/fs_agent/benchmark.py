@@ -116,6 +116,13 @@ class RunMetrics:
     agent_count: int = 0
     agents: list[AgentMetrics] = field(default_factory=list)
 
+    # Fixer loop metrics
+    fixer_iterations: int = 0
+    fixer_patches_applied: int = 0
+    fixer_patches_failed: int = 0
+    fixer_resolved: bool = False
+    fixer_loop: dict[str, Any] = field(default_factory=dict)
+
     # Output metadata
     artifact_dir: str = ""
     started_at: str = ""
@@ -146,6 +153,17 @@ def _build_pattern(
     raise ValueError(f"Unknown pattern: {name}")
 
 
+def _extract_test_cases(task: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    """Extract test-case data from a task dict when the flag is enabled."""
+    if not settings.include_test_cases:
+        return {}
+    return {
+        "ui_instruct": task.get("ui_instruct", []),
+        "backend_test_cases": task.get("backend_test_cases", []),
+        "data_structures": task.get("data_structures", []),
+    }
+
+
 def run_single(
     task_id: str,
     instruction: str,
@@ -154,6 +172,7 @@ def run_single(
     settings: Settings,
     llm: BaseLLMClient | None = None,
     llm_per_role: dict[str, BaseLLMClient] | None = None,
+    task_test_cases: dict[str, Any] | None = None,
 ) -> RunMetrics:
     """Execute one (task × pattern) combination and return metrics.
 
@@ -232,6 +251,7 @@ def run_single(
             artifact_dir=run_artifact_dir,
             llm=llm,
             llm_per_role=llm_per_role or {},
+            task_test_cases=task_test_cases or {},
         )
 
         registry = AgentRegistry()
@@ -294,6 +314,15 @@ def run_single(
             )
         metrics.agent_count = len(reports)
         metrics.agents = agent_metrics
+
+        # Fixer loop metrics
+        fixer = om.fixer_loop_result
+        if fixer:
+            metrics.fixer_iterations = fixer.get("iterations_run", 0)
+            metrics.fixer_patches_applied = fixer.get("total_patches_applied", 0)
+            metrics.fixer_patches_failed = fixer.get("total_patches_failed", 0)
+            metrics.fixer_resolved = fixer.get("resolved", False)
+            metrics.fixer_loop = fixer
 
         # Store full orchestration metrics dict for the JSON report
         metrics.orchestration_metrics = om.to_dict()
@@ -365,6 +394,8 @@ def run_benchmark(
     artifact_root: Path | None = None,
     max_validation_retries: int | None = None,
     workers: int = 1,
+    include_test_cases: bool = False,
+    max_fixer_iterations: int | None = None,
 ) -> list[RunMetrics]:
     """Run the full benchmark and write results to disk.
 
@@ -382,6 +413,14 @@ def run_benchmark(
     if max_validation_retries is not None:
         base_settings = base_settings.model_copy(
             update={"max_validation_retries": max_validation_retries}
+        )
+    if include_test_cases:
+        base_settings = base_settings.model_copy(
+            update={"include_test_cases": True}
+        )
+    if max_fixer_iterations is not None:
+        base_settings = base_settings.model_copy(
+            update={"max_fixer_iterations": max_fixer_iterations}
         )
 
     patterns = patterns or list(ALL_PATTERNS)
@@ -442,6 +481,7 @@ def run_benchmark(
                 settings=base_settings,
                 llm=llm,
                 llm_per_role=llm_per_role,
+                task_test_cases=_extract_test_cases(task, base_settings),
             )
             _on_result(metrics)
     else:
@@ -455,6 +495,7 @@ def run_benchmark(
                 pattern=pattern,
                 artifact_dir=artifact_root,
                 settings=base_settings,
+                task_test_cases=_extract_test_cases(task, base_settings),
                 # llm=None → run_single builds its own clients
             )
 
@@ -543,6 +584,11 @@ def _write_csv_report(metrics: list[RunMetrics], path: Path) -> None:
         "coordination_call_count",
         "coordination_to_functional_ratio",
         "coordination_overhead_seconds",
+        # Fixer loop
+        "fixer_iterations",
+        "fixer_patches_applied",
+        "fixer_patches_failed",
+        "fixer_resolved",
         # Timestamps
         "started_at",
         "finished_at",
@@ -556,6 +602,7 @@ def _write_csv_report(metrics: list[RunMetrics], path: Path) -> None:
             row.pop("task_instruction", None)
             row.pop("artifact_dir", None)
             row.pop("orchestration_metrics", None)
+            row.pop("fixer_loop", None)
             writer.writerow(row)
     logger.info("Wrote CSV report → %s", path)
 
@@ -626,6 +673,20 @@ def _write_summary(metrics: list[RunMetrics], path: Path) -> None:
 
             # Errors
             "errors": [r.error for r in failed if r.error],
+
+            # Fixer loop
+            "avg_fixer_iterations": round(
+                _safe_avg([r.fixer_iterations for r in successful]), 2
+            ),
+            "avg_fixer_patches_applied": round(
+                _safe_avg([r.fixer_patches_applied for r in successful]), 2
+            ),
+            "fixer_resolved_count": sum(
+                1 for r in successful if r.fixer_resolved
+            ),
+            "fixer_needed_count": sum(
+                1 for r in successful if r.fixer_iterations > 0
+            ),
         }
 
     path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
