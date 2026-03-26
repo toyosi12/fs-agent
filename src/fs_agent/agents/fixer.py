@@ -154,10 +154,44 @@ class FixerAgent(BaseAgent):
             prompt += f"## Backend source code\n{backend_code[:15000]}\n\n"
         if frontend_code:
             prompt += f"## Frontend source code\n{frontend_code[:15000]}\n\n"
+
+        # Include test cases so the fixer understands expected behavior
+        test_cases = context.task_test_cases
+        if test_cases:
+            prompt += self._format_test_cases(test_cases)
+
         prompt += "Produce a JSON array of patches to fix the errors above."
 
         raw = context.get_llm("fixer").generate(prompt, system=system, temperature=0.1)
         return self._parse_patches(raw)
+
+    def _format_test_cases(self, test_cases: dict[str, Any]) -> str:
+        """Format dataset test cases so the fixer understands expected behavior."""
+        lines: list[str] = [
+            "## Acceptance Criteria (expected application behavior)\n"
+        ]
+        ui_tests = test_cases.get("ui_instruct", [])
+        if ui_tests:
+            lines.append("Frontend/UI test cases:")
+            for i, tc in enumerate(ui_tests, 1):
+                lines.append(f"  {i}. {tc.get('task', '')}")
+                lines.append(f"     Expected: {tc.get('expected_result', '')}")
+
+        backend_tests = test_cases.get("backend_test_cases", [])
+        if backend_tests:
+            lines.append("\nBackend API test cases:")
+            for i, tc in enumerate(backend_tests, 1):
+                lines.append(f"  {i}. {tc.get('instruction', '')}")
+                lines.append(f"     Expected: {tc.get('expected_result', '')}")
+
+        data_structures = test_cases.get("data_structures", [])
+        if data_structures:
+            lines.append(f"\nRequired data structures: {', '.join(data_structures)}")
+
+        lines.append(
+            "\nEnsure your patches produce code that satisfies these criteria.\n\n"
+        )
+        return "\n".join(lines)
 
     def _parse_patches(self, raw: str) -> list[dict[str, str]]:
         """Parse the LLM response into a list of patch dicts."""
