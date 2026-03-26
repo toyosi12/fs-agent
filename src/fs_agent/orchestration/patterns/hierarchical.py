@@ -23,7 +23,7 @@ from ..base import OrchestrationError, OrchestrationPattern
 from ..metrics import CoordinationCall
 from ..registry import AgentRegistry
 from ...agents.base import AgentRole
-from .._helpers import execute_agent, run_validation_loop
+from .._helpers import execute_agent, run_fixer_loop, run_validation_loop
 
 
 @dataclass
@@ -213,6 +213,13 @@ class HierarchicalOrchestrator(OrchestrationPattern):
                 )
 
             m.success = True
+
+            # --- Fixer loop (fixer ↔ infra) ---
+            reports, fixer_result = run_fixer_loop(
+                context, self.registry, reports, m,
+                pattern_name="hierarchical",
+            )
+            m.fixer_loop_result = fixer_result.to_dict()
 
             # --- Validation loop ---
             reports = run_validation_loop(

@@ -9,6 +9,7 @@ from ..agents import (
     BackendAgent,
     BackendApiAgent,
     BackendDbAgent,
+    FixerAgent,
     FrontendAgent,
     FrontendPagesAgent,
     FrontendUiAgent,
@@ -44,3 +45,5 @@ def register_default_agents(registry: AgentRegistry) -> None:
     registry.register(AgentRole.BACKEND_API, BackendApiAgent)
     registry.register(AgentRole.FRONTEND_PAGES, FrontendPagesAgent)
     registry.register(AgentRole.FRONTEND_UI, FrontendUiAgent)
+    # Post-generation fix agent
+    registry.register(AgentRole.FIXER, FixerAgent)

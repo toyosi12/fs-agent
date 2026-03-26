@@ -123,6 +123,7 @@ class InfraAgent(BaseAgent):
             ),
             artifacts={
                 "infra_log": body,
+                "diagnostics": errors,
                 "db_name": db_name,
                 "backend_dir": str(backend_dir),
                 "frontend_dir": str(frontend_dir),

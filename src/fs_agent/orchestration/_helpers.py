@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from ..artifact_writer import persist_agent_output
 from ..context import AgentReport, RunContext
@@ -248,3 +249,175 @@ def run_validation_loop(
         logger.info("✓ Validation passed after retries")
 
     return reports
+
+
+# ---------------------------------------------------------------------------
+# Fixer ↔ Infra loop
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FixerLoopResult:
+    """Tracks what the fixer loop resolved and how many iterations it took."""
+
+    iterations_run: int = 0
+    max_iterations: int = 0
+    resolved: bool = False
+    initial_errors: list[str] = field(default_factory=list)
+    final_errors: list[str] = field(default_factory=list)
+    patches_applied_per_iteration: list[int] = field(default_factory=list)
+    patches_failed_per_iteration: list[int] = field(default_factory=list)
+    issues_resolved: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "iterations_run": self.iterations_run,
+            "max_iterations": self.max_iterations,
+            "resolved": self.resolved,
+            "initial_error_count": len(self.initial_errors),
+            "final_error_count": len(self.final_errors),
+            "initial_errors": self.initial_errors,
+            "final_errors": self.final_errors,
+            "patches_applied_per_iteration": self.patches_applied_per_iteration,
+            "patches_failed_per_iteration": self.patches_failed_per_iteration,
+            "total_patches_applied": sum(self.patches_applied_per_iteration),
+            "total_patches_failed": sum(self.patches_failed_per_iteration),
+            "issues_resolved": self.issues_resolved,
+        }
+
+
+def run_fixer_loop(
+    context: RunContext,
+    registry: "AgentRegistry",
+    reports: list[AgentReport],
+    metrics: "OrchestrationMetrics",
+    *,
+    max_iterations: int | None = None,
+    pattern_name: str = "",
+) -> tuple[list[AgentReport], FixerLoopResult]:
+    """Run the fixer ↔ infra loop until errors are resolved or max iterations.
+
+    After each fixer run, infra is re-run to check if the fixes worked.
+    Returns the updated reports list and a FixerLoopResult with detailed
+    metrics about what was fixed.
+
+    Parameters
+    ----------
+    context:
+        The shared run context.
+    registry:
+        Agent registry (needs FIXER and INFRA roles).
+    reports:
+        Current list of agent reports.
+    metrics:
+        Orchestration metrics to record executions.
+    max_iterations:
+        Max fixer→infra cycles. If None, reads from settings.
+    pattern_name:
+        Name of the orchestration pattern (for logging).
+
+    Returns
+    -------
+    Tuple of (updated reports, FixerLoopResult).
+    """
+    from ..logger import get_logger
+
+    logger = get_logger(f"orchestration.fixer.{pattern_name or 'loop'}")
+
+    if max_iterations is None:
+        max_iterations = context.settings.max_fixer_iterations
+
+    result = FixerLoopResult(max_iterations=max_iterations)
+
+    if max_iterations <= 0:
+        logger.info("Fixer loop disabled (max_iterations=0)")
+        return reports, result
+
+    # Find the most recent infra report to check for errors
+    infra_errors = _get_infra_errors(reports)
+    if not infra_errors:
+        logger.info("No infra errors detected — skipping fixer loop")
+        return reports, result
+
+    result.initial_errors = list(infra_errors)
+    logger.info(
+        "Fixer loop starting: %d infra errors, max %d iterations",
+        len(infra_errors), max_iterations,
+    )
+
+    for iteration in range(1, max_iterations + 1):
+        logger.info(
+            "── Fixer iteration %d/%d ── (%d errors remaining)",
+            iteration, max_iterations, len(infra_errors),
+        )
+
+        # 1. Run the fixer agent
+        fixer_agent = registry.build(AgentRole.FIXER)
+        fixer_report, fixer_exec = execute_agent(
+            fixer_agent, AgentRole.FIXER, context, attempt=iteration,
+        )
+        metrics.record_agent_execution(fixer_exec)
+        reports.append(fixer_report)
+
+        patches_applied = fixer_report.artifacts.get("fixer_patch_count", 0)
+        patches_failed = len(fixer_report.artifacts.get("fixer_patches_failed", []))
+        result.patches_applied_per_iteration.append(patches_applied)
+        result.patches_failed_per_iteration.append(patches_failed)
+
+        if patches_applied == 0:
+            logger.info("Fixer produced no patches — stopping loop")
+            break
+
+        # 2. Re-run infra to see if fixes helped
+        infra_agent = registry.build(AgentRole.INFRA)
+        infra_report, infra_exec = execute_agent(
+            infra_agent, AgentRole.INFRA, context, attempt=iteration + 1,
+        )
+        metrics.record_agent_execution(infra_exec)
+        reports.append(infra_report)
+
+        # 3. Check new error state
+        new_errors = _get_infra_errors(reports)
+        resolved = set(infra_errors) - set(new_errors)
+        result.issues_resolved.extend(sorted(resolved))
+
+        logger.info(
+            "  Iteration %d: %d patches applied, %d errors resolved, %d remaining",
+            iteration, patches_applied, len(resolved), len(new_errors),
+        )
+
+        result.iterations_run = iteration
+
+        if not new_errors:
+            result.resolved = True
+            logger.info("✓ All infra errors resolved after %d iterations", iteration)
+            break
+
+        infra_errors = new_errors
+
+    result.final_errors = list(infra_errors) if not result.resolved else []
+
+    if not result.resolved:
+        logger.warning(
+            "Fixer loop exhausted %d iterations, %d errors remain",
+            result.iterations_run, len(result.final_errors),
+        )
+
+    return reports, result
+
+
+def _get_infra_errors(reports: list[AgentReport]) -> list[str]:
+    """Extract error diagnostics from the most recent infra report."""
+    for report in reversed(reports):
+        if report.role == "infra" and report.status == "error":
+            # Diagnostics are stored in the artifacts by the infra agent
+            diags = report.artifacts.get("diagnostics", [])
+            if diags:
+                return diags
+            # Also check the infra_log for error markers
+            log = report.artifacts.get("infra_log", "")
+            errors = [
+                line.strip() for line in log.split("\n")
+                if line.strip().startswith("✗")
+            ]
+            return errors
+    return []

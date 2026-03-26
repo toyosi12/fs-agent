@@ -130,6 +130,12 @@ class ArchitectAgent(BaseAgent):
                 f"  {last_error}\n"
                 "Please fix this and return ONLY valid, parseable JSON.\n"
             )
+
+        # Inject acceptance criteria from dataset test cases when available
+        test_cases = context.task_test_cases
+        if test_cases:
+            prompt += self._format_test_cases(test_cases)
+
         # Allow a dedicated provider/model for the architect via
         # FS_AGENT_LLM_PROVIDER_ARCHITECT / FS_AGENT_LLM_MODEL_ARCHITECT.
         response = context.get_llm("architect").generate(
@@ -201,3 +207,33 @@ class ArchitectAgent(BaseAgent):
                         break
                 return cleaned.strip()
         return text
+
+    def _format_test_cases(self, test_cases: dict[str, Any]) -> str:
+        """Format dataset test cases as acceptance criteria for the spec prompt."""
+        lines: list[str] = [
+            "\n\nAcceptance Criteria (the generated application will be evaluated against these):\n"
+        ]
+
+        ui_tests = test_cases.get("ui_instruct", [])
+        if ui_tests:
+            lines.append("Frontend/UI test cases:")
+            for i, tc in enumerate(ui_tests, 1):
+                lines.append(f"  {i}. {tc.get('task', '')}")
+                lines.append(f"     Expected: {tc.get('expected_result', '')}")
+
+        backend_tests = test_cases.get("backend_test_cases", [])
+        if backend_tests:
+            lines.append("\nBackend API test cases:")
+            for i, tc in enumerate(backend_tests, 1):
+                lines.append(f"  {i}. {tc.get('instruction', '')}")
+                lines.append(f"     Expected: {tc.get('expected_result', '')}")
+
+        data_structures = test_cases.get("data_structures", [])
+        if data_structures:
+            lines.append(f"\nRequired data structures: {', '.join(data_structures)}")
+
+        lines.append(
+            "\nEnsure your spec includes endpoints, routes, and components that "
+            "satisfy ALL of the above criteria.\n"
+        )
+        return "\n".join(lines)
