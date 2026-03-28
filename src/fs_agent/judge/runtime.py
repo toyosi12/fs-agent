@@ -106,7 +106,16 @@ def _generate_request_specs(
         "- Generate realistic test data.\n"
         "- For invalid-input tests, use clearly invalid data.\n"
         "- query_params is a dict of URL query parameters (for GET).\n"
-        "- body is a dict for POST/PUT JSON bodies (or null)."
+        "- body is a dict for POST/PUT JSON bodies (or null).\n\n"
+        "Request chaining — when a later test needs a resource ID created by an "
+        "earlier test, use a $response reference instead of a fabricated ID:\n"
+        "  $response[<test_index>].<json_path>\n"
+        "Examples:\n"
+        '  "path": "/api/games/$response[0].id/move"  (uses the id field from test 0\'s response)\n'
+        '  "body": {"gameId": "$response[0].id"}\n'
+        "The runner will substitute the real value at execution time. "
+        "IMPORTANT: Do NOT invent placeholder UUIDs — always use $response references "
+        "for IDs that come from earlier creation endpoints."
     )
 
     user = (
@@ -139,6 +148,43 @@ def _generate_request_specs(
     return specs
 
 
+_REF_PATTERN = re.compile(r"\$response\[(\d+)\]\.([\w.]+)")
+
+
+def _resolve_refs(value: Any, responses: list[dict]) -> Any:
+    """Recursively substitute ``$response[N].field`` refs with real values."""
+    if isinstance(value, str):
+        def _replacer(m: re.Match) -> str:
+            idx = int(m.group(1))
+            field_path = m.group(2)
+            if idx >= len(responses):
+                return m.group(0)  # leave unresolved
+            resp = responses[idx]
+            body_text = resp.get("body", "")
+            try:
+                body_json = json.loads(body_text)
+            except (json.JSONDecodeError, TypeError):
+                return m.group(0)
+            # Walk the dotted field path
+            obj: Any = body_json
+            for part in field_path.split("."):
+                if isinstance(obj, dict):
+                    obj = obj.get(part)
+                elif isinstance(obj, list) and part.isdigit():
+                    obj = obj[int(part)] if int(part) < len(obj) else None
+                else:
+                    return m.group(0)
+                if obj is None:
+                    return m.group(0)
+            return str(obj)
+        return _REF_PATTERN.sub(_replacer, value)
+    if isinstance(value, dict):
+        return {k: _resolve_refs(v, responses) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_refs(item, responses) for item in value]
+    return value
+
+
 def _execute_requests(
     base_url: str,
     specs: list[dict],
@@ -147,6 +193,9 @@ def _execute_requests(
 ) -> list[dict]:
     """Execute each HTTP request spec against the running backend.
 
+    Supports request chaining via ``$response[N].field`` references in paths
+    and bodies — the referenced value is substituted from the Nth response.
+
     Returns a list of result dicts: ``status_code``, ``body`` (str),
     ``error`` (str or None).
     """
@@ -154,10 +203,10 @@ def _execute_requests(
     with httpx.Client(base_url=base_url, timeout=timeout) as client:
         for spec in specs:
             method = spec.get("method", "GET").upper()
-            path = spec.get("path", "/")
+            path = _resolve_refs(spec.get("path", "/"), results)
             headers = spec.get("headers") or {}
-            body = spec.get("body")
-            params = spec.get("query_params")
+            body = _resolve_refs(spec.get("body"), results)
+            params = _resolve_refs(spec.get("query_params"), results)
             idx = spec.get("test_index", len(results))
 
             try:
