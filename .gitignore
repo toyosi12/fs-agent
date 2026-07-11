@@ -20,6 +20,7 @@ ruff_cache/
 .DS_Store
 
 # Project artifacts
+old-artifacts/
 artifacts/
 
 *.zip

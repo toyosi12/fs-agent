@@ -101,7 +101,8 @@ class DummyLLMClient(BaseLLMClient):
 
 # Well-known base URLs for OpenAI-compatible providers.
 OPENAI_BASE_URL = "https://api.openai.com/v1"
-DASHSCOPE_BASE_URL = "https://coding-intl.dashscope.aliyuncs.com/v1"
+# DASHSCOPE_BASE_URL = "https://coding-intl.dashscope.aliyuncs.com/v1"
+DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
 
 class OpenAILLMClient(BaseLLMClient):

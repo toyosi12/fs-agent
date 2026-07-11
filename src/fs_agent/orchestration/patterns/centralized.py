@@ -61,6 +61,7 @@ class CentralizedOrchestrator(OrchestrationPattern):
         m.start_timer()
 
         reports: list[AgentReport] = []
+        completed_roles: set[str] = set()
         available = [role.value for role in AgentRole]
 
         self.logger.info(
@@ -113,6 +114,14 @@ class CentralizedOrchestrator(OrchestrationPattern):
                         context={"iteration": iteration, "raw_decision": decision},
                     )
 
+                if role.value in completed_roles:
+                    raise OrchestrationError(
+                        "centralized",
+                        f"Coordinator selected already-completed agent '{role.value}'. "
+                        f"Completed: {sorted(completed_roles)}",
+                        context={"iteration": iteration, "raw_decision": decision},
+                    )
+
                 # Dispatch
                 agent = self.registry.build(role)
 
@@ -130,6 +139,7 @@ class CentralizedOrchestrator(OrchestrationPattern):
                 report, execution = execute_agent(agent, role, context)
                 m.record_agent_execution(execution)
                 reports.append(report)
+                completed_roles.add(role.value)
             else:
                 raise OrchestrationError(
                     "centralized",
