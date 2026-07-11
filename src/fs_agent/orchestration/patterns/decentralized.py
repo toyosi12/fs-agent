@@ -113,8 +113,8 @@ class DecentralizedOrchestrator(OrchestrationPattern):
                 completed.add(current_role.value)
 
                 # --- Negotiation phase ---
-                # After frontend runs, compare contracts with backend and
-                # re-run mismatched agent(s) with corrective feedback.
+                # Compare contracts for diagnostics only. In single-run mode,
+                # no agents are re-run from negotiation feedback.
                 if (
                     current_role == AgentRole.FRONTEND
                     and AgentRole.BACKEND.value in completed
@@ -243,57 +243,25 @@ class DecentralizedOrchestrator(OrchestrationPattern):
         m: object,
         completed: set[str],
     ) -> list[AgentReport]:
-        """Compare backend/frontend contracts; re-run mismatched agents."""
+        """Compare backend/frontend contracts without re-running agents."""
         extra_reports: list[AgentReport] = []
 
-        for round_num in range(1, self.MAX_NEGOTIATION_ROUNDS + 1):
-            self.logger.info(
-                "── negotiation round %d/%d ──────────────────────────────",
-                round_num,
-                self.MAX_NEGOTIATION_ROUNDS,
-            )
+        self.logger.info("── negotiation check (single-pass mode) ───────────────")
+        feedback, coord_call = self._detect_mismatches(context, 1)
+        m.record_coordination_call(coord_call)
 
-            feedback, coord_call = self._detect_mismatches(context, round_num)
-            m.record_coordination_call(coord_call)
+        target = feedback.get("target")
+        issues = feedback.get("issues", "")
 
-            target = feedback.get("target")
-            issues = feedback.get("issues", "")
+        if target == "none":
+            self.logger.info("  negotiation: no mismatches detected")
+            return extra_reports
 
-            if target == "none":
-                self.logger.info(
-                    "  negotiation: no mismatches detected — done"
-                )
-                break
-
-            self.logger.info(
-                "  negotiation: re-running %s — %s",
-                target,
-                issues[:200],
-            )
-
-            try:
-                rerun_role = AgentRole(target)
-            except ValueError:
-                self.logger.warning(
-                    "  negotiation: unknown target '%s', skipping", target
-                )
-                break
-
-            # Re-run the mismatched agent with corrective feedback
-            context.extra_context = {
-                "upstream_context": (
-                    f"=== NEGOTIATION FEEDBACK (round {round_num}) ===\n"
-                    f"The following integration issues were detected between "
-                    f"your output and the other agents' output:\n\n{issues}\n\n"
-                    f"Please regenerate your code to fix these issues. "
-                    f"Keep everything else the same."
-                )
-            }
-
-            agent = self.registry.build(rerun_role)
-            report, execution = execute_agent(agent, rerun_role, context)
-            m.record_agent_execution(execution)
-            extra_reports.append(report)
+        self.logger.warning(
+            "  negotiation detected mismatch target=%s (single-pass mode: no rerun): %s",
+            target,
+            issues[:240],
+        )
 
         return extra_reports
 

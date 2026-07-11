@@ -198,18 +198,28 @@ def run_single(
     run_artifact_dir = artifact_dir / task_id / pattern
     run_artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    # Set up a per-run file logger (use a dedicated logger, not root,
-    # so parallel workers don't interfere with each other).
-    run_logger_name = f"fs_agent.benchmark.run.{task_id}.{pattern}"
-    run_logger = logging.getLogger(run_logger_name)
+    # Set up a per-run file handler on the root logger so logs from all
+    # modules (orchestrators, agents, helpers) are captured.
+    #
+    # We filter by thread id to avoid cross-talk between concurrent runs.
+    class _ThreadFilter(logging.Filter):
+        def __init__(self, thread_id: int) -> None:
+            super().__init__()
+            self.thread_id = thread_id
+
+        def filter(self, record: logging.LogRecord) -> bool:
+            return record.thread == self.thread_id
+
+    run_thread_id = threading.get_ident()
+    root_logger = logging.getLogger()
     run_log_path = run_artifact_dir / "run.log"
     file_handler = logging.FileHandler(run_log_path, mode="w", encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s %(name)-30s %(levelname)-8s %(message)s")
     )
-    run_logger.addHandler(file_handler)
-    run_logger.setLevel(logging.DEBUG)
+    file_handler.addFilter(_ThreadFilter(run_thread_id))
+    root_logger.addHandler(file_handler)
 
     # Reset token counters for this run
     llm.reset_usage()
@@ -357,7 +367,7 @@ def run_single(
     )
 
     # Remove the per-run file handler
-    run_logger.removeHandler(file_handler)
+    root_logger.removeHandler(file_handler)
     file_handler.close()
 
     return metrics

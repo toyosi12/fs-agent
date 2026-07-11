@@ -169,55 +169,24 @@ class ParallelOrchestrator(OrchestrationPattern):
         context: RunContext,
         m: object,
     ) -> list[AgentReport]:
-        """Compare backend/frontend contracts; re-run mismatched agent."""
+        """Compare backend/frontend contracts without re-running agents."""
         extra_reports: list[AgentReport] = []
 
-        for round_num in range(1, self.MAX_RECONCILIATION_ROUNDS + 1):
-            self.logger.info(
-                "── reconciliation round %d/%d ──────────────────────────",
-                round_num,
-                self.MAX_RECONCILIATION_ROUNDS,
-            )
+        self.logger.info("── reconciliation check (single-pass mode) ───────────")
+        feedback, coord_call = self._detect_mismatches(context, 1)
+        m.record_coordination_call(coord_call)
 
-            feedback, coord_call = self._detect_mismatches(context, round_num)
-            m.record_coordination_call(coord_call)
+        target = feedback.get("target")
+        issues = feedback.get("issues", "")
+        if target == "none":
+            self.logger.info("  reconciliation: no mismatches")
+            return extra_reports
 
-            target = feedback.get("target")
-            issues = feedback.get("issues", "")
-
-            if target == "none":
-                self.logger.info("  reconciliation: no mismatches — done")
-                break
-
-            self.logger.info(
-                "  reconciliation: re-running %s — %s",
-                target,
-                issues[:200],
-            )
-
-            try:
-                rerun_role = AgentRole(target)
-            except ValueError:
-                self.logger.warning(
-                    "  reconciliation: unknown target '%s', skipping", target
-                )
-                break
-
-            context.extra_context = {
-                "upstream_context": (
-                    f"=== RECONCILIATION FEEDBACK (round {round_num}) ===\n"
-                    f"After parallel execution, these integration issues were "
-                    f"detected between backend and frontend:\n\n{issues}\n\n"
-                    f"Please regenerate your code to fix these issues. "
-                    f"Keep everything else the same."
-                )
-            }
-
-            agent = self.registry.build(rerun_role)
-            report, execution = execute_agent(agent, rerun_role, context)
-            m.record_agent_execution(execution)
-            extra_reports.append(report)
-
+        self.logger.warning(
+            "  reconciliation detected mismatch target=%s (single-pass mode: no rerun): %s",
+            target,
+            issues[:240],
+        )
         return extra_reports
 
     def _detect_mismatches(

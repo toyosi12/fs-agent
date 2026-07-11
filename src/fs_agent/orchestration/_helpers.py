@@ -129,14 +129,10 @@ def run_validation_loop(
     max_retries: int | None = None,
     pattern_name: str = "",
 ) -> list[AgentReport]:
-    """Run post-generation validation and re-run failing agents.
+    """Run post-generation validation in report-only mode.
 
-    After all agents have completed their initial run, this function:
-    1. Validates the generated project directory.
-    2. If validation passes, returns the reports as-is.
-    3. If validation fails and retries remain, identifies the responsible
-       agents, injects error feedback into the context, re-runs them,
-       and validates again.
+    This function validates generated outputs and logs findings, but does
+    not re-run any agents. Agent execution order remains a single pass.
 
     Parameters
     ----------
@@ -156,7 +152,7 @@ def run_validation_loop(
 
     Returns
     -------
-    Updated list of agent reports (may include retry reports appended).
+    Unchanged list of agent reports.
     """
     from ..logger import get_logger
     from ..validation import validate_project, ValidationResult
@@ -177,76 +173,21 @@ def run_validation_loop(
         )
         return reports
 
-    for iteration in range(1, max_retries + 1):
-        result = validate_project(project_dir)
-        logger.info(
-            "Validation iteration %d/%d: %s",
-            iteration, max_retries, result.summary(),
-        )
+    result = validate_project(project_dir)
+    logger.info("Validation summary: %s", result.summary())
+    if result.passed:
+        logger.info("✓ Validation passed")
+        return reports
 
-        if result.passed:
-            logger.info("✓ Validation passed on iteration %d", iteration)
-            return reports
+    for issue in result.issues:
+        if issue.severity != "error":
+            continue
+        loc = f" ({issue.file})" if issue.file else ""
+        logger.info("  ✗ [%s]%s: %s", issue.component, loc, issue.message)
 
-        # Log each error for diagnostics
-        for issue in result.issues:
-            if issue.severity == "error":
-                loc = f" ({issue.file})" if issue.file else ""
-                logger.info(
-                    "  ✗ [%s]%s: %s", issue.component, loc, issue.message
-                )
-
-        # Determine which agents need to re-run
-        failed_components = {
-            issue.component
-            for issue in result.issues
-            if issue.severity == "error"
-        }
-        roles_to_retry: set[AgentRole] = set()
-        for comp in failed_components:
-            role = _COMPONENT_TO_ROLE.get(comp)
-            if role:
-                roles_to_retry.add(role)
-
-        if not roles_to_retry:
-            logger.warning(
-                "Validation has errors but no responsible agents identified"
-            )
-            return reports
-
-        # Inject validation feedback into user_request so agents see it
-        feedback = result.feedback_prompt()
-        original_request = context.user_request
-        context.user_request = f"{original_request}\n\n{feedback}"
-
-        logger.info(
-            "Re-running agents %s (iteration %d/%d) to fix %d errors",
-            [r.value for r in roles_to_retry],
-            iteration,
-            max_retries,
-            result.error_count,
-        )
-
-        for role in roles_to_retry:
-            agent = registry.build(role)
-            report, execution = execute_agent(
-                agent, role, context, attempt=iteration + 1
-            )
-            metrics.record_agent_execution(execution)
-            reports.append(report)
-
-        # Restore original request for next iteration
-        context.user_request = original_request
-
-    # Final validation check after all retries
-    final_result = validate_project(project_dir)
-    if not final_result.passed:
-        logger.warning(
-            "Validation still failing after %d retries: %s",
-            max_retries, final_result.summary(),
-        )
-    else:
-        logger.info("✓ Validation passed after retries")
+    logger.info(
+        "Validation report-only mode: no agent re-runs will be performed"
+    )
 
     return reports
 
@@ -294,11 +235,10 @@ def run_fixer_loop(
     max_iterations: int | None = None,
     pattern_name: str = "",
 ) -> tuple[list[AgentReport], FixerLoopResult]:
-    """Run the fixer ↔ infra loop until errors are resolved or max iterations.
+    """Run a single-pass fixer step with no agent handoffs.
 
-    After each fixer run, infra is re-run to check if the fixes worked.
-    Returns the updated reports list and a FixerLoopResult with detailed
-    metrics about what was fixed.
+    The fixer inspects infra diagnostics and applies patches directly.
+    No additional agents (including infra) are re-run.
 
     Parameters
     ----------
@@ -329,7 +269,7 @@ def run_fixer_loop(
     result = FixerLoopResult(max_iterations=max_iterations)
 
     if max_iterations <= 0:
-        logger.info("Fixer loop disabled (max_iterations=0)")
+        logger.info("Fixer step disabled (max_iterations=0)")
         return reports, result
 
     # Find the most recent infra report to check for errors
@@ -340,67 +280,36 @@ def run_fixer_loop(
 
     result.initial_errors = list(infra_errors)
     logger.info(
-        "Fixer loop starting: %d infra errors, max %d iterations",
-        len(infra_errors), max_iterations,
+        "Fixer single-pass mode: %d infra errors detected",
+        len(infra_errors),
     )
 
-    for iteration in range(1, max_iterations + 1):
-        logger.info(
-            "── Fixer iteration %d/%d ── (%d errors remaining)",
-            iteration, max_iterations, len(infra_errors),
+    fixer_agent = registry.build(AgentRole.FIXER)
+    fixer_report, fixer_exec = execute_agent(
+        fixer_agent, AgentRole.FIXER, context, attempt=1,
+    )
+    metrics.record_agent_execution(fixer_exec)
+    reports.append(fixer_report)
+
+    patches_applied = fixer_report.artifacts.get("fixer_patch_count", 0)
+    patches_failed = len(fixer_report.artifacts.get("fixer_patches_failed", []))
+    result.patches_applied_per_iteration.append(patches_applied)
+    result.patches_failed_per_iteration.append(patches_failed)
+    result.iterations_run = 1
+
+    # Without re-running infra we cannot verify runtime resolution here.
+    result.resolved = False
+    result.final_errors = list(infra_errors)
+    if patches_applied > 0:
+        result.issues_resolved.append(
+            "Fixer applied patches; runtime resolution not re-checked in single-pass mode"
         )
 
-        # 1. Run the fixer agent
-        fixer_agent = registry.build(AgentRole.FIXER)
-        fixer_report, fixer_exec = execute_agent(
-            fixer_agent, AgentRole.FIXER, context, attempt=iteration,
-        )
-        metrics.record_agent_execution(fixer_exec)
-        reports.append(fixer_report)
-
-        patches_applied = fixer_report.artifacts.get("fixer_patch_count", 0)
-        patches_failed = len(fixer_report.artifacts.get("fixer_patches_failed", []))
-        result.patches_applied_per_iteration.append(patches_applied)
-        result.patches_failed_per_iteration.append(patches_failed)
-
-        if patches_applied == 0:
-            logger.info("Fixer produced no patches — stopping loop")
-            break
-
-        # 2. Re-run infra to see if fixes helped
-        infra_agent = registry.build(AgentRole.INFRA)
-        infra_report, infra_exec = execute_agent(
-            infra_agent, AgentRole.INFRA, context, attempt=iteration + 1,
-        )
-        metrics.record_agent_execution(infra_exec)
-        reports.append(infra_report)
-
-        # 3. Check new error state
-        new_errors = _get_infra_errors(reports)
-        resolved = set(infra_errors) - set(new_errors)
-        result.issues_resolved.extend(sorted(resolved))
-
-        logger.info(
-            "  Iteration %d: %d patches applied, %d errors resolved, %d remaining",
-            iteration, patches_applied, len(resolved), len(new_errors),
-        )
-
-        result.iterations_run = iteration
-
-        if not new_errors:
-            result.resolved = True
-            logger.info("✓ All infra errors resolved after %d iterations", iteration)
-            break
-
-        infra_errors = new_errors
-
-    result.final_errors = list(infra_errors) if not result.resolved else []
-
-    if not result.resolved:
-        logger.warning(
-            "Fixer loop exhausted %d iterations, %d errors remain",
-            result.iterations_run, len(result.final_errors),
-        )
+    logger.info(
+        "Fixer single-pass complete: applied=%d failed=%d (no infra re-run)",
+        patches_applied,
+        patches_failed,
+    )
 
     return reports, result
 
