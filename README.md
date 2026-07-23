@@ -96,6 +96,7 @@ artifacts/projects/collaborative-task-manager/
 └── metadata/         # Agent artifacts, specs, and attachments
 ```
 
+
 ## Running the Benchmark
 
 The benchmark runner reads tasks from `dataset/tasks_with_difficulty.json`, executes each task through every orchestration pattern, and records detailed metrics.
