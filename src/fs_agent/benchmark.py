@@ -244,49 +244,31 @@ def run_single(
         started_at=started_at.isoformat(),
     )
 
-    try:
-        run_settings = settings.model_copy(
-            update={
-                "artifact_dir": run_artifact_dir,
-                "orchestration_pattern": pattern,
-            }
-        )
+    context: RunContext | None = None
 
-        context = RunContext(
-            spec=None,
-            user_request=instruction,
-            settings=run_settings,
-            workspace_dir=Path.cwd(),
-            artifact_dir=run_artifact_dir,
-            llm=llm,
-            llm_per_role=llm_per_role or {},
-            task_test_cases=task_test_cases or {},
-        )
+    def _snapshot_metrics_from_context() -> None:
+        """Populate RunMetrics from context.metrics, even on failed runs."""
+        if context is None:
+            return
 
-        registry = AgentRegistry()
-        register_default_agents(registry)
-        orchestrator = _build_pattern(pattern, registry, llm)
-
-        reports: list[AgentReport] = list(orchestrator.run(context))
-
-        # --- Populate from OrchestrationMetrics ---
         om = context.metrics
-        wall_clock = time.perf_counter() - start_wall
 
-        metrics.success = om.success
-        metrics.wall_clock_seconds = round(wall_clock, 3)
         metrics.agent_total_seconds = round(
             sum(e.duration_seconds for e in om.agent_executions), 3
         )
         metrics.orchestration_overhead_seconds = round(
-            max(wall_clock - metrics.agent_total_seconds, 0), 3
+            max(metrics.wall_clock_seconds - metrics.agent_total_seconds, 0), 3
         )
 
         # RQ2 — Total token usage
         usage = llm.usage_stats
         metrics.llm_call_count = usage["call_count"]
-        metrics.prompt_tokens = om.functional_prompt_tokens + om.coordination_prompt_tokens
-        metrics.completion_tokens = om.functional_completion_tokens + om.coordination_completion_tokens
+        metrics.prompt_tokens = (
+            om.functional_prompt_tokens + om.coordination_prompt_tokens
+        )
+        metrics.completion_tokens = (
+            om.functional_completion_tokens + om.coordination_completion_tokens
+        )
         metrics.total_tokens = om.total_tokens
         metrics.cost_estimate = round(om.cost_estimate(), 6)
 
@@ -321,7 +303,7 @@ def run_single(
                     attempt=ex.attempt,
                 )
             )
-        metrics.agent_count = len(reports)
+        metrics.agent_count = len(agent_metrics)
         metrics.agents = agent_metrics
 
         # Fixer loop metrics
@@ -333,13 +315,44 @@ def run_single(
             metrics.fixer_resolved = fixer.get("resolved", False)
             metrics.fixer_loop = fixer
 
-        # Store full orchestration metrics dict for the JSON report
         metrics.orchestration_metrics = om.to_dict()
+
+    try:
+        run_settings = settings.model_copy(
+            update={
+                "artifact_dir": run_artifact_dir,
+                "orchestration_pattern": pattern,
+            }
+        )
+
+        context = RunContext(
+            spec=None,
+            user_request=instruction,
+            settings=run_settings,
+            workspace_dir=Path.cwd(),
+            artifact_dir=run_artifact_dir,
+            llm=llm,
+            llm_per_role=llm_per_role or {},
+            task_test_cases=task_test_cases or {},
+        )
+
+        registry = AgentRegistry()
+        register_default_agents(registry)
+        orchestrator = _build_pattern(pattern, registry, llm)
+
+        reports: list[AgentReport] = list(orchestrator.run(context))
+
+        wall_clock = time.perf_counter() - start_wall
+
+        metrics.success = context.metrics.success
+        metrics.wall_clock_seconds = round(wall_clock, 3)
+        _snapshot_metrics_from_context()
 
     except OrchestrationError as exc:
         metrics.wall_clock_seconds = round(time.perf_counter() - start_wall, 3)
         metrics.error = f"OrchestrationError[{exc.pattern}]: {exc.reason}"
         metrics.success = False
+        _snapshot_metrics_from_context()
         logger.error(
             "✗ BENCHMARK ORCHESTRATION ERROR  task=%s  pattern=%s  reason=%s",
             task_id, pattern, exc.reason,
@@ -349,6 +362,7 @@ def run_single(
         metrics.wall_clock_seconds = round(time.perf_counter() - start_wall, 3)
         metrics.error = f"{type(exc).__name__}: {exc}"
         metrics.success = False
+        _snapshot_metrics_from_context()
         logger.exception("✗ BENCHMARK FAILED  task=%s  pattern=%s", task_id, pattern)
 
     finished_at = datetime.now(timezone.utc)
