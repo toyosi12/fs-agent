@@ -138,6 +138,7 @@ class OpenAILLMClient(BaseLLMClient):
 
         try:
             completion = self._client.chat.completions.create(
+                model=self.model,
                 messages=messages,
                 temperature=temperature,
             )
@@ -271,6 +272,7 @@ def build_llm_clients_from_env(
     *,
     default_provider: str = "",
     default_model: str = "",
+    default_api_key: str | None = None,
     default_base_url: str | None = None,
 ) -> tuple[BaseLLMClient, dict[str, BaseLLMClient]]:
     """Build a shared LLM client plus per-role overrides from environment variables.
