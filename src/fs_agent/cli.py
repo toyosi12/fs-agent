@@ -21,7 +21,7 @@ def run(
     request: str = typer.Argument(..., help="Natural language description of the desired app"),
     artifact_dir: Path | None = typer.Option(None, help="Directory to store generated artifacts"),
     dry_run: bool = typer.Option(False, help="Skip shell-side effects and focus on planning"),
-    pattern: str = typer.Option("sequential", help="Orchestration pattern: sequential, centralized, decentralized, hierarchical, or parallel"),
+    pattern: str = typer.Option("sequential", help="Orchestration pattern: sequential, centralized, decentralized, or parallel"),
     max_validation_retries: int = typer.Option(3, "--max-retries", help="Maximum validation-retry iterations (0 to disable)"),
 ) -> None:
     """Execute the orchestrator against a project spec."""
@@ -45,7 +45,7 @@ def benchmark(
     ),
     patterns: Optional[str] = typer.Option(
         None,
-        help="Comma-separated list of patterns to benchmark (default: all five)",
+        help="Comma-separated list of patterns to benchmark (default: all four)",
     ),
     task_ids: Optional[str] = typer.Option(
         None,

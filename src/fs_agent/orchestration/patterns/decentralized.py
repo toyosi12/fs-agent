@@ -68,7 +68,12 @@ class DecentralizedOrchestrator(OrchestrationPattern):
 
         reports: list[AgentReport] = []
         completed: set[str] = set()
-        all_roles = [role.value for role in AgentRole]
+        all_roles = [
+            AgentRole.ARCHITECT.value,
+            AgentRole.BACKEND.value,
+            AgentRole.FRONTEND.value,
+            AgentRole.INFRA.value,
+        ]
 
         self.logger.info(
             "╔══ DECENTRALIZED ORCHESTRATOR START ══╗  max_iterations=%d  agents=%s",

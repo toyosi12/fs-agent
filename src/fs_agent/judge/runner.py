@@ -24,7 +24,7 @@ from ..llm import BaseLLMClient, OpenAILLMClient, OPENAI_BASE_URL
 from ..logger import get_logger
 from .executor import find_project_dir, start_project, stop_project
 from .fixes import generate_fix_attempts
-from .models import JudgeResult, JudgeTrace, TaskJudgeResult
+from .models import JudgeResult, JudgeTrace
 from .runtime import evaluate_application_runtime
 from .scoring import evaluate_application
 
@@ -34,7 +34,6 @@ ALL_PATTERNS: list[str] = [
     "sequential",
     "centralized",
     "decentralized",
-    "hierarchical",
     "parallel",
 ]
 

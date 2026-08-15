@@ -62,7 +62,12 @@ class CentralizedOrchestrator(OrchestrationPattern):
 
         reports: list[AgentReport] = []
         completed_roles: set[str] = set()
-        available = [role.value for role in AgentRole]
+        available = [
+            AgentRole.ARCHITECT.value,
+            AgentRole.BACKEND.value,
+            AgentRole.FRONTEND.value,
+            AgentRole.INFRA.value,
+        ]
 
         self.logger.info(
             "╔══ CENTRALIZED ORCHESTRATOR START ══╗  max_iterations=%d  agents=%s",

@@ -19,14 +19,13 @@ Python-based multi-agent orchestrator that drafts full-stack JavaScript applicat
 7. **Benchmark Runner** – Reads tasks from a dataset, runs every pattern, and produces metrics reports.
 
 ## Orchestration Patterns
-Five patterns are available, selectable via the `--pattern` flag:
+Four patterns are available, selectable via the `--pattern` flag:
 
 | Pattern | Description |
 |---|---|
 | `sequential` | Fixed order: Architect → Backend → Frontend → Infra |
 | `centralized` | An LLM coordinator decides which agent runs next in a loop |
 | `decentralized` | Each agent decides who should handle the work next (handoff routing) |
-| `hierarchical` | Two-level supervisor tree — root picks a phase, phase supervisor picks an agent |
 | `parallel` | Fan-out/fan-in — independent agents run concurrently via ThreadPoolExecutor |
 
 ### Post-Generation Validation
@@ -120,7 +119,7 @@ fs-agent benchmark dataset/tasks_with_difficulty.json --artifact-root artifacts/
 | Flag | Description |
 |---|---|
 | `DATASET` (required) | Path to the tasks JSON file |
-| `--patterns` | Comma-separated subset of patterns (default: all six) |
+| `--patterns` | Comma-separated subset of patterns (default: all four) |
 | `--task-ids` | Comma-separated task IDs to run (default: all) |
 | `--max-tasks` | Cap on number of tasks to process |
 | `--artifact-root` | Root directory for outputs (default: `artifacts/benchmark/`) |
@@ -134,7 +133,6 @@ artifacts/benchmark/
 │   │   └── projects/…           # Generated project files
 │   ├── centralized/
 │   ├── decentralized/
-│   ├── hierarchical/
 │   └── parallel/
 ├── 000002/
 │   └── …

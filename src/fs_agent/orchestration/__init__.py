@@ -4,7 +4,6 @@ from .base import OrchestrationError, OrchestrationPattern
 from .metrics import AgentExecution, CoordinationCall, OrchestrationMetrics
 from .patterns.centralized import CentralizedOrchestrator
 from .patterns.decentralized import DecentralizedOrchestrator
-from .patterns.hierarchical import HierarchicalOrchestrator
 from .patterns.parallel import ParallelOrchestrator
 from .patterns.sequential import SequentialOrchestrator
 from .registry import AgentRegistry, register_default_agents
@@ -15,7 +14,6 @@ __all__ = [
     "CentralizedOrchestrator",
     "CoordinationCall",
     "DecentralizedOrchestrator",
-    "HierarchicalOrchestrator",
     "OrchestrationError",
     "OrchestrationMetrics",
     "OrchestrationPattern",

@@ -16,11 +16,6 @@ class AgentRole(str, Enum):
     BACKEND = "backend"
     FRONTEND = "frontend"
     INFRA = "infra"
-    # Specialized sub-roles for hierarchical decomposition
-    BACKEND_API = "backend_api"
-    BACKEND_DB = "backend_db"
-    FRONTEND_PAGES = "frontend_pages"
-    FRONTEND_UI = "frontend_ui"
     # Post-generation fix agent
     FIXER = "fixer"
 

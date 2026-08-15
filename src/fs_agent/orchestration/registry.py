@@ -7,12 +7,8 @@ from typing import Dict, Type
 from ..agents import (
     ArchitectAgent,
     BackendAgent,
-    BackendApiAgent,
-    BackendDbAgent,
     FixerAgent,
     FrontendAgent,
-    FrontendPagesAgent,
-    FrontendUiAgent,
     InfraAgent,
 )
 from ..agents.base import AgentRole, BaseAgent
@@ -35,15 +31,10 @@ class AgentRegistry:
 
 
 def register_default_agents(registry: AgentRegistry) -> None:
-    """Register all agents including specialized sub-role agents."""
+    """Register the four core agents and the post-generation fixer."""
     registry.register(AgentRole.ARCHITECT, ArchitectAgent)
     registry.register(AgentRole.BACKEND, BackendAgent)
     registry.register(AgentRole.FRONTEND, FrontendAgent)
     registry.register(AgentRole.INFRA, InfraAgent)
-    # Specialized sub-agents for hierarchical decomposition
-    registry.register(AgentRole.BACKEND_DB, BackendDbAgent)
-    registry.register(AgentRole.BACKEND_API, BackendApiAgent)
-    registry.register(AgentRole.FRONTEND_PAGES, FrontendPagesAgent)
-    registry.register(AgentRole.FRONTEND_UI, FrontendUiAgent)
     # Post-generation fix agent
     registry.register(AgentRole.FIXER, FixerAgent)

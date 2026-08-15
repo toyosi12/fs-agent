@@ -26,14 +26,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings, get_settings
-from .context import AgentReport, RunContext
+from .context import RunContext
 from .llm import BaseLLMClient, build_llm_clients_from_env
 from .logger import get_logger
 from .orchestration import (
     AgentRegistry,
     CentralizedOrchestrator,
     DecentralizedOrchestrator,
-    HierarchicalOrchestrator,
     OrchestrationError,
     ParallelOrchestrator,
     SequentialOrchestrator,
@@ -46,7 +45,6 @@ ALL_PATTERNS: list[str] = [
     "sequential",
     "centralized",
     "decentralized",
-    "hierarchical",
     "parallel",
 ]
 
@@ -145,8 +143,6 @@ def _build_pattern(
         return CentralizedOrchestrator(registry=registry, llm=llm)
     if name == "decentralized":
         return DecentralizedOrchestrator(registry=registry, llm=llm)
-    if name == "hierarchical":
-        return HierarchicalOrchestrator(registry=registry, llm=llm)
     if name == "parallel":
         return ParallelOrchestrator(registry=registry, llm=llm)
     raise ValueError(f"Unknown pattern: {name}")
@@ -340,7 +336,7 @@ def run_single(
         register_default_agents(registry)
         orchestrator = _build_pattern(pattern, registry, llm)
 
-        reports: list[AgentReport] = list(orchestrator.run(context))
+        list(orchestrator.run(context))
 
         wall_clock = time.perf_counter() - start_wall
 

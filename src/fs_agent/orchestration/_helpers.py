@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any
 
 from ..artifact_writer import persist_agent_output
 from ..context import AgentReport, RunContext
@@ -111,12 +111,6 @@ _COMPONENT_TO_ROLE: dict[str, AgentRole] = {
     "infra": AgentRole.INFRA,
     "integration": AgentRole.BACKEND,  # integration issues default to backend
     "project": AgentRole.INFRA,
-    # Specialized sub-roles are retried via their parent agent in
-    # the validation loop (the registry has all roles registered).
-    "backend_api": AgentRole.BACKEND_API,
-    "backend_db": AgentRole.BACKEND_DB,
-    "frontend_pages": AgentRole.FRONTEND_PAGES,
-    "frontend_ui": AgentRole.FRONTEND_UI,
 }
 
 
@@ -155,7 +149,7 @@ def run_validation_loop(
     Unchanged list of agent reports.
     """
     from ..logger import get_logger
-    from ..validation import validate_project, ValidationResult
+    from ..validation import validate_project
 
     logger = get_logger(f"orchestration.validation.{pattern_name or 'loop'}")
 

@@ -148,32 +148,10 @@ class RunContext:
     # ------------------------------------------------------------------
 
     def agent_output(self, role: str) -> dict[str, Any] | None:
-        """Return the artifacts dict from a completed agent, or None.
-
-        For compound roles like 'backend', also checks specialized
-        sub-roles ('backend_api', 'backend_db') and merges them.
-        """
-        # Direct match first
+        """Return the artifacts dict from a completed agent, or None."""
         for report in self.transcripts:
             if report.role == role:
                 return report.artifacts
-
-        # Check if specialized sub-agents produced output for this role
-        _SUB_ROLES = {
-            "backend": ["backend_api", "backend_db"],
-            "frontend": ["frontend_pages", "frontend_ui"],
-        }
-        sub_roles = _SUB_ROLES.get(role, [])
-        if sub_roles:
-            merged: dict[str, Any] = {}
-            found = False
-            for report in self.transcripts:
-                if report.role in sub_roles:
-                    merged.update(report.artifacts)
-                    found = True
-            if found:
-                return merged
-
         return None
 
     def extract_backend_contract(self) -> str:
@@ -279,22 +257,10 @@ class RunContext:
     def get_llm(self, role: str | None = None) -> BaseLLMClient:
         """Return the LLM client for a given agent role.
 
-        If no role-specific client is configured, fall back to the parent
-        role (e.g. ``backend_api`` → ``backend``) then to the shared
-        ``llm`` instance.
+        If no role-specific client is configured, return the shared client.
         """
         if role is None:
             return self.llm
         if role in self.llm_per_role:
             return self.llm_per_role[role]
-        # Fall back to parent role for specialized sub-agents
-        _PARENT = {
-            "backend_api": "backend",
-            "backend_db": "backend",
-            "frontend_pages": "frontend",
-            "frontend_ui": "frontend",
-        }
-        parent = _PARENT.get(role)
-        if parent and parent in self.llm_per_role:
-            return self.llm_per_role[parent]
         return self.llm
