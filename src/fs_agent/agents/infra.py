@@ -15,9 +15,12 @@ class InfraAgent(BaseAgent):
 
     def run(self, context: RunContext) -> AgentResult:
         start = datetime.now(timezone.utc)
-        spec = context.require_spec()
-        slug = context._slugify(spec.metadata.name)
         projects_dir = context.projects_dir
+        slug = (
+            context._slugify(context.spec.metadata.name)
+            if context.spec is not None
+            else context._slugify(projects_dir.name)
+        )
 
         # Locate sub-projects written by backend/frontend agents
         backend_dir = projects_dir / "backend"

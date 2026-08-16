@@ -9,6 +9,7 @@ import pytest
 
 from fs_agent.config import Settings
 from fs_agent.context import RunContext
+from fs_agent.context import AgentReport
 from fs_agent.llm import BaseLLMClient
 from fs_agent.orchestration import (
     AgentRegistry,
@@ -16,6 +17,7 @@ from fs_agent.orchestration import (
     OrchestrationError,
     register_default_agents,
 )
+from fs_agent.orchestration.metrics import AgentExecution, CoordinationCall
 
 
 class ScriptedCoordinatorLLM(BaseLLMClient):
@@ -159,3 +161,61 @@ def test_centralized_raises_on_bad_agent_name(tmp_path: Path) -> None:
     # LLM, it would raise OrchestrationError for the unknown agent.
     with pytest.raises((RuntimeError, OrchestrationError)):
         list(orchestrator.run(context))
+
+
+def test_centralized_can_run_the_same_agent_more_than_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decisions = [
+        {"action": "run", "agent": "infra", "reason": "first attempt"},
+        {"action": "run", "agent": "infra", "reason": "retry after error"},
+        {"action": "done", "reason": "retry succeeded"},
+    ]
+    llm = ScriptedCoordinatorLLM(decisions)
+    context = _make_context(tmp_path, llm)
+    registry = AgentRegistry()
+    register_default_agents(registry)
+
+    def fake_execute(agent, role, run_context, *, attempt=1):
+        report = AgentReport(
+            role=role.value,
+            summary=f"attempt {attempt}",
+            artifacts={},
+            status="error" if attempt == 1 else "success",
+            started_at=None,
+            finished_at=None,
+        )
+        run_context.record(report)
+        return report, AgentExecution(
+            role=role.value,
+            status=report.status,
+            attempt=attempt,
+        )
+
+    monkeypatch.setattr(
+        "fs_agent.orchestration.patterns.centralized.execute_agent", fake_execute
+    )
+    monkeypatch.setattr(
+        CentralizedOrchestrator,
+        "_synthesize_brief",
+        lambda self, context, role, iteration: (
+            "retry context",
+            CoordinationCall(purpose="test", iteration=iteration),
+        ),
+    )
+    monkeypatch.setattr(
+        "fs_agent.orchestration.patterns.centralized.run_fixer_loop",
+        lambda context, registry, reports, metrics, pattern_name: (
+            reports,
+            type("Result", (), {"to_dict": lambda self: {}})(),
+        ),
+    )
+    monkeypatch.setattr(
+        "fs_agent.orchestration.patterns.centralized.run_validation_loop",
+        lambda context, registry, reports, metrics, pattern_name: reports,
+    )
+
+    reports = list(CentralizedOrchestrator(registry, llm).run(context))
+
+    assert [report.role for report in reports] == ["infra", "infra"]
+    assert [run.attempt for run in context.metrics.agent_executions] == [1, 2]

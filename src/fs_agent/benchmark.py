@@ -36,12 +36,14 @@ from .orchestration import (
     OrchestrationError,
     ParallelOrchestrator,
     SequentialOrchestrator,
+    SingleOrchestrator,
     register_default_agents,
 )
 
 logger = get_logger(__name__)
 
 ALL_PATTERNS: list[str] = [
+    "single",
     "sequential",
     "centralized",
     "decentralized",
@@ -137,6 +139,8 @@ def _build_pattern(
     name: str, registry: AgentRegistry, llm: BaseLLMClient
 ) -> Any:
     """Instantiate the appropriate OrchestrationPattern."""
+    if name == "single":
+        return SingleOrchestrator(registry=registry)
     if name == "sequential":
         return SequentialOrchestrator(registry=registry)
     if name == "centralized":

@@ -229,10 +229,7 @@ def run_fixer_loop(
     max_iterations: int | None = None,
     pattern_name: str = "",
 ) -> tuple[list[AgentReport], FixerLoopResult]:
-    """Run a single-pass fixer step with no agent handoffs.
-
-    The fixer inspects infra diagnostics and applies patches directly.
-    No additional agents (including infra) are re-run.
+    """Alternate fixer and infra until infra passes or the limit is reached.
 
     Parameters
     ----------
@@ -274,36 +271,56 @@ def run_fixer_loop(
 
     result.initial_errors = list(infra_errors)
     logger.info(
-        "Fixer single-pass mode: %d infra errors detected",
+        "Fixer/infra loop: %d initial infra errors, max_iterations=%d",
         len(infra_errors),
+        max_iterations,
     )
 
-    fixer_agent = registry.build(AgentRole.FIXER)
-    fixer_report, fixer_exec = execute_agent(
-        fixer_agent, AgentRole.FIXER, context, attempt=1,
-    )
-    metrics.record_agent_execution(fixer_exec)
-    reports.append(fixer_report)
+    for iteration in range(1, max_iterations + 1):
+        logger.info("Fixer/infra iteration %d/%d", iteration, max_iterations)
 
-    patches_applied = fixer_report.artifacts.get("fixer_patch_count", 0)
-    patches_failed = len(fixer_report.artifacts.get("fixer_patches_failed", []))
-    result.patches_applied_per_iteration.append(patches_applied)
-    result.patches_failed_per_iteration.append(patches_failed)
-    result.iterations_run = 1
-
-    # Without re-running infra we cannot verify runtime resolution here.
-    result.resolved = False
-    result.final_errors = list(infra_errors)
-    if patches_applied > 0:
-        result.issues_resolved.append(
-            "Fixer applied patches; runtime resolution not re-checked in single-pass mode"
+        fixer_agent = registry.build(AgentRole.FIXER)
+        fixer_report, fixer_exec = execute_agent(
+            fixer_agent, AgentRole.FIXER, context, attempt=iteration,
         )
+        metrics.record_agent_execution(fixer_exec)
+        reports.append(fixer_report)
 
-    logger.info(
-        "Fixer single-pass complete: applied=%d failed=%d (no infra re-run)",
-        patches_applied,
-        patches_failed,
-    )
+        patches_applied = fixer_report.artifacts.get("fixer_patch_count", 0)
+        patches_failed = len(fixer_report.artifacts.get("fixer_patches_failed", []))
+        result.patches_applied_per_iteration.append(patches_applied)
+        result.patches_failed_per_iteration.append(patches_failed)
+        result.iterations_run = iteration
+
+        infra_agent = registry.build(AgentRole.INFRA)
+        infra_report, infra_exec = execute_agent(
+            infra_agent, AgentRole.INFRA, context, attempt=iteration + 1,
+        )
+        metrics.record_agent_execution(infra_exec)
+        reports.append(infra_report)
+
+        infra_errors = _get_infra_errors(reports)
+        if not infra_errors:
+            result.resolved = True
+            result.final_errors = []
+            result.issues_resolved = list(result.initial_errors)
+            logger.info(
+                "Fixer/infra loop resolved after %d iteration(s)", iteration
+            )
+            break
+
+        result.final_errors = list(infra_errors)
+        logger.info(
+            "Infra still reports %d error(s) after fixer iteration %d",
+            len(infra_errors),
+            iteration,
+        )
+    else:
+        logger.warning(
+            "Fixer/infra loop exhausted %d iteration(s) with %d error(s) remaining",
+            max_iterations,
+            len(result.final_errors),
+        )
 
     return reports, result
 
@@ -311,16 +328,18 @@ def run_fixer_loop(
 def _get_infra_errors(reports: list[AgentReport]) -> list[str]:
     """Extract error diagnostics from the most recent infra report."""
     for report in reversed(reports):
-        if report.role == "infra" and report.status == "error":
-            # Diagnostics are stored in the artifacts by the infra agent
-            diags = report.artifacts.get("diagnostics", [])
-            if diags:
-                return diags
-            # Also check the infra_log for error markers
-            log = report.artifacts.get("infra_log", "")
-            errors = [
-                line.strip() for line in log.split("\n")
-                if line.strip().startswith("✗")
-            ]
-            return errors
+        if report.role != "infra":
+            continue
+        if report.status != "error":
+            return []
+        # Diagnostics are stored in the artifacts by the infra agent
+        diags = report.artifacts.get("diagnostics", [])
+        if diags:
+            return diags
+        # Also check the infra_log for error markers
+        log = report.artifacts.get("infra_log", "")
+        return [
+            line.strip() for line in log.split("\n")
+            if line.strip().startswith("✗")
+        ]
     return []

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 class Settings(BaseModel):
     """Top-level runtime configuration."""
 
-    orchestration_pattern: Literal["sequential", "centralized", "decentralized", "parallel"] = "sequential"
+    orchestration_pattern: Literal["single", "sequential", "centralized", "decentralized", "parallel"] = "sequential"
     artifact_dir: Path = Field(default_factory=lambda: Path("artifacts"))
     dry_run: bool = False
     max_validation_retries: int = Field(

@@ -12,6 +12,7 @@ from ..logger import get_logger
 
 
 class AgentRole(str, Enum):
+    FULLSTACK = "fullstack"
     ARCHITECT = "architect"
     BACKEND = "backend"
     FRONTEND = "frontend"

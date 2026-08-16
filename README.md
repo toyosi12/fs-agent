@@ -7,7 +7,7 @@ Python-based multi-agent orchestrator that drafts full-stack JavaScript applicat
 - Emit JavaScript backend APIs (Express) and React/Vite frontends that consume them.
 - Produce infra automation that creates databases, runs migrations, and starts dev servers.
 - Keep orchestration logic in Python to experiment with different coordination strategies.
-- Benchmark six orchestration patterns head-to-head on the same task dataset.
+- Benchmark five execution and orchestration patterns head-to-head on the same task dataset.
 
 ## Components
 1. **Orchestrator** – Applies a chosen orchestration pattern and hands off context between agents.
@@ -19,12 +19,13 @@ Python-based multi-agent orchestrator that drafts full-stack JavaScript applicat
 7. **Benchmark Runner** – Reads tasks from a dataset, runs every pattern, and produces metrics reports.
 
 ## Orchestration Patterns
-Four patterns are available, selectable via the `--pattern` flag:
+Five patterns are available, selectable via the `--pattern` flag:
 
 | Pattern | Description |
 |---|---|
+| `single` | One autonomous full-stack coding agent, followed by the common infra evaluation |
 | `sequential` | Fixed order: Architect → Backend → Frontend → Infra |
-| `centralized` | An LLM coordinator decides which agent runs next in a loop |
+| `centralized` | An LLM coordinator decides which agent runs next and may re-run agents |
 | `decentralized` | Each agent decides who should handle the work next (handoff routing) |
 | `parallel` | Fan-out/fan-in — independent agents run concurrently via ThreadPoolExecutor |
 
@@ -102,7 +103,7 @@ The benchmark runner reads tasks from `dataset/tasks_with_difficulty.json`, exec
 
 ### Quick start
 ```bash
-# Run all 100 tasks × all 6 patterns (600 runs total)
+# Run all tasks × all 5 patterns
 fs-agent benchmark dataset/tasks_with_difficulty.json
 
 # Run a quick test with just 1 task and 2 patterns
@@ -119,7 +120,7 @@ fs-agent benchmark dataset/tasks_with_difficulty.json --artifact-root artifacts/
 | Flag | Description |
 |---|---|
 | `DATASET` (required) | Path to the tasks JSON file |
-| `--patterns` | Comma-separated subset of patterns (default: all four) |
+| `--patterns` | Comma-separated subset of patterns (default: all five) |
 | `--task-ids` | Comma-separated task IDs to run (default: all) |
 | `--max-tasks` | Cap on number of tasks to process |
 | `--artifact-root` | Root directory for outputs (default: `artifacts/benchmark/`) |

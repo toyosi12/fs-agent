@@ -9,6 +9,7 @@ from ..agents import (
     BackendAgent,
     FixerAgent,
     FrontendAgent,
+    FullstackAgent,
     InfraAgent,
 )
 from ..agents.base import AgentRole, BaseAgent
@@ -31,7 +32,8 @@ class AgentRegistry:
 
 
 def register_default_agents(registry: AgentRegistry) -> None:
-    """Register the four core agents and the post-generation fixer."""
+    """Register the core agents, single-agent baseline, and fixer."""
+    registry.register(AgentRole.FULLSTACK, FullstackAgent)
     registry.register(AgentRole.ARCHITECT, ArchitectAgent)
     registry.register(AgentRole.BACKEND, BackendAgent)
     registry.register(AgentRole.FRONTEND, FrontendAgent)

@@ -61,7 +61,7 @@ class CentralizedOrchestrator(OrchestrationPattern):
         m.start_timer()
 
         reports: list[AgentReport] = []
-        completed_roles: set[str] = set()
+        role_attempts: dict[str, int] = {}
         available = [
             AgentRole.ARCHITECT.value,
             AgentRole.BACKEND.value,
@@ -119,14 +119,6 @@ class CentralizedOrchestrator(OrchestrationPattern):
                         context={"iteration": iteration, "raw_decision": decision},
                     )
 
-                if role.value in completed_roles:
-                    raise OrchestrationError(
-                        "centralized",
-                        f"Coordinator selected already-completed agent '{role.value}'. "
-                        f"Completed: {sorted(completed_roles)}",
-                        context={"iteration": iteration, "raw_decision": decision},
-                    )
-
                 # Dispatch
                 agent = self.registry.build(role)
 
@@ -141,10 +133,13 @@ class CentralizedOrchestrator(OrchestrationPattern):
                 else:
                     context.extra_context = {}
 
-                report, execution = execute_agent(agent, role, context)
+                attempt = role_attempts.get(role.value, 0) + 1
+                role_attempts[role.value] = attempt
+                report, execution = execute_agent(
+                    agent, role, context, attempt=attempt
+                )
                 m.record_agent_execution(execution)
                 reports.append(report)
-                completed_roles.add(role.value)
             else:
                 raise OrchestrationError(
                     "centralized",
@@ -354,6 +349,8 @@ class CentralizedOrchestrator(OrchestrationPattern):
             "- 'architect' must run first if it has not run yet.\n"
             "- 'backend' and 'frontend' require 'architect' to have completed.\n"
             "- 'infra' requires 'backend' and 'frontend' to have completed.\n"
+            "- You may run any agent again when its prior run failed or when later output "
+            "reveals that its work must be revised. Explain why in the reason.\n"
             "- Once all necessary agents have run, respond with action 'done'.\n\n"
             "Respond with exactly one JSON object:\n"
             '  { "action": "run", "agent": "<agent_name>", "reason": "..." }\n'

@@ -59,6 +59,9 @@ class RunContext:
     # Task-level test cases from the dataset (ui_instruct, backend_test_cases,
     # data_structures).  Populated when --include-test-cases is set.
     task_test_cases: dict[str, Any] = field(default_factory=dict)
+    # Used by patterns that generate a project without a separate architect
+    # specification, such as the single-agent baseline.
+    project_dir_override: Path | None = None
 
     def record(self, report: AgentReport) -> None:
         self.transcripts.append(report)
@@ -84,6 +87,8 @@ class RunContext:
 
         Structure: <artifact_dir>/projects/<slug>/
         """
+        if self.project_dir_override is not None:
+            return self.project_dir_override
         spec = self.require_spec()
         slug = self._slugify(spec.metadata.name)
         return self.artifact_dir / "projects" / slug
